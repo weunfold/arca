@@ -4236,7 +4236,7 @@ fn the_runner_image_is_built_once_from_the_pinned_image_with_the_default_package
     let built = builds(&pool);
     assert_eq!(built.len(), 1, "{built:?}");
     let tag = built[0]
-        .strip_prefix("build -t ")
+        .strip_prefix("build --force-rm -t ")
         .and_then(|rest| rest.strip_suffix(" -"))
         .expect("a build of one name, its recipe on the standard input")
         .to_string();
@@ -4368,20 +4368,41 @@ fn the_packages_an_operator_names_are_the_ones_installed_and_an_empty_list_adds_
 }
 
 /// A build that fails is said, with the image, the step and the package manager's own words, and no runner is
-/// registered or started while there is no image. It is tried again, and the pool starts once a build succeeds.
+/// registered or started while there is no image. Its stopped container is not left behind, and each further failure
+/// waits twice as long, up to the cap. It is tried again, and the pool starts once a build succeeds.
 #[test]
 fn a_runner_image_that_cannot_be_built_is_said_and_no_runner_starts_on_it() {
     let scratch = scratch_dir();
     let github = Github::start(&scratch, &format!("/orgs/{ORG}"));
     let mut pool = one_slot_pool(&github, |_| {});
     pool.env.push(("POOL_BUILD_RETRY", "1".to_string()));
+    pool.env.push(("POOL_BACKOFF_MAX", "4".to_string()));
     fs::write(
         pool.dir.join("docker/fail-build"),
         "E: Unable to locate package libatomic1\n",
     )
     .expect("a build that fails");
     pool.start(&github);
-    wait_for(&pool, "two builds that failed", || builds(&pool).len() >= 2);
+    // Four failures: the retries after them wait 1, 2, 4 and then 4 seconds, the cap.
+    wait_for(&pool, "four failed builds said", || {
+        pool.output().matches("could not be built").count() >= 4
+    });
+    let built = builds(&pool);
+    assert!(built.len() >= 4, "{built:?}");
+    for call in &built {
+        assert!(call.starts_with("build --force-rm -t "), "{call}");
+    }
+    // A failed step's container is removed by the build itself: no container of the failed build is left.
+    assert_eq!(pool.containers(), Vec::<String>::new());
+    let pauses: Vec<u64> = pool
+        .output()
+        .lines()
+        .filter_map(|line| line.split("it is tried again in ").nth(1))
+        .filter_map(|rest| rest.split(' ').next())
+        .filter_map(|seconds| seconds.parse().ok())
+        .collect();
+    assert!(pauses.len() >= 4, "{pauses:?}");
+    assert_eq!(&pauses[..4], &[1, 2, 4, 4], "{pauses:?}");
     let output = pool.output();
     assert!(
         output.contains(&format!(
@@ -4504,5 +4525,54 @@ fn a_job_that_runs_when_the_controller_restarts_runs_to_its_end_and_is_recorded(
     assert_eq!(pool.stop(), Some(0));
     assert_eq!(pool.containers(), Vec::<String>::new());
     assert!(!pool.dir.join("state/slots/0/kept").exists());
+    let _ = fs::remove_dir_all(scratch);
+}
+
+/// A runner left at its job is adopted when the next controller starts, and its job is timed to when the runner's
+/// own container ended, not to when that controller next looked: the gap in which nothing watched it is no part of
+/// the job.
+#[test]
+fn an_adopted_job_is_timed_to_its_runners_end_and_not_the_unwatched_gap() {
+    let scratch = scratch_dir();
+    let github = Github::start(&scratch, &format!("/orgs/{ORG}"));
+    let mut pool = one_slot_pool(&github, |_| {});
+    pool.env.push(("FAKE_DETACH", "1".to_string()));
+    pool.start(&github);
+    wait_for(&pool, "an idle runner", || github.live().len() == 1);
+    let kept = github.live()[0].clone();
+    github.queue(&["arca"], "a job nobody watches", 6.0);
+    wait_for(&pool, "the slot shown as busy", || {
+        pool.read("run/slots/0").starts_with("busy\t")
+    });
+    assert_eq!(pool.stop(), Some(0));
+    assert!(pool.dir.join("state/slots/0/kept").is_file());
+    // The runner ends its job while no controller is there, and the ended container stays for a while before the
+    // next controller starts. Those seconds are the gap the job's time must not include.
+    let ended = pool.dir.join("docker/containers/pool1-s0-run/exit");
+    wait_for(&pool, "the runner to end its job by itself", || {
+        ended.is_file()
+    });
+    std::thread::sleep(Duration::from_secs(5));
+
+    pool.start(&github);
+    wait_for(&pool, "the job recorded by the next controller", || {
+        pool.jobs().len() == 1
+    });
+    let job = &pool.jobs()[0];
+    assert_eq!(
+        (job[4].as_str(), job[5].as_str()),
+        ("a job nobody watches", "Succeeded")
+    );
+    // About the six seconds the job took. A time taken when the next controller looked would be eleven or more.
+    let seconds: u64 = job[6].parse().expect("seconds");
+    assert!(
+        (5..=8).contains(&seconds),
+        "the unwatched gap is no part of the job: {seconds}"
+    );
+    wait_for(&pool, "a fresh runner", || {
+        github.live().iter().any(|live| live.id != kept.id)
+    });
+    assert_eq!(pool.stop(), Some(0));
+    assert_eq!(pool.containers(), Vec::<String>::new());
     let _ = fs::remove_dir_all(scratch);
 }

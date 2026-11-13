@@ -69,12 +69,12 @@ play_runner() {
       [ -d "$dir" ] || return
       if [ -n "$tools_mounted" ]; then
         echo "mv: cannot move '/home/runner/externals' to '/home/runner/externals.old': Device or resource busy" >>"$dir/log"
-        echo 1 >"$dir/exit"
+        end_play 1
         return
       fi
       if [ -n "${FAKE_UPDATE_FAILS:-}" ]; then
         echo "An error occurred: the update could not be downloaded" >>"$dir/log"
-        echo 1 >"$dir/exit"
+        end_play 1
         return
       fi
       echo "Runner will exit shortly for update, should be back online within 10 seconds." >>"$dir/log"
@@ -96,15 +96,22 @@ play_runner() {
       rm -f "$dir/worker"
       echo "$(date -u '+%Y-%m-%d %H:%M:%S')Z: Job $job completed with result: $result" >>"$dir/log"
       printf '%s' "$jit" | "$FAKE_REAL_CURL" -sS -m 5 -X POST --data-binary @- "$FAKE_GITHUB/_fake/done" >/dev/null 2>&1
-      echo 0 >"$dir/exit"
+      end_play 0
       return
     fi
     if [ "$(printf '%s' "$answer" | jq -r '.gone // empty' 2>/dev/null)" = true ]; then
-      echo 1 >"$dir/exit"
+      end_play 1
       return
     fi
     sleep 0.05
   done
+}
+
+# A container's process ends: its exit code, and when, as Docker's State.FinishedAt says. A controller that adopts a
+# runner left by an earlier one times its job to this, not to when it next looked.
+end_play() {
+  echo "$1" >"$dir/exit"
+  date -u '+%Y-%m-%dT%H:%M:%S.%NZ' >"$dir/finished"
 }
 
 # The file that holds a local image's Dockerfile: its name with every / and : made a _.
@@ -175,7 +182,13 @@ case $command in
     for last; do :; done
     dir="$root/containers/$last"
     [ -d "$dir" ] || exit 1
-    if [ -e "$dir/exit" ]; then echo "false $(cat "$dir/exit")"; else echo "true 0"; fi
+    case " $* " in
+      *FinishedAt*)
+        # An ended container says when: a running one, or one whose end was never played, has no time to give.
+        if [ -e "$dir/finished" ]; then cat "$dir/finished"; else echo "0001-01-01T00:00:00Z"; fi
+        ;;
+      *) if [ -e "$dir/exit" ]; then echo "false $(cat "$dir/exit")"; else echo "true 0"; fi ;;
+    esac
     ;;
   top)
     dir="$root/containers/$1"
@@ -213,17 +226,22 @@ case $command in
     ;;
   build)
     # `docker build -t <name> -`: the Dockerfile comes on the standard input. A test makes it fail with the package
-    # manager's words in $root/fail-build.
-    tag=''
+    # manager's words in $root/fail-build. Without buildx, Docker's legacy builder keeps a failed step's container
+    # unless --force-rm is given: that container has no label of the pool, so it is modeled here as it is left.
+    tag='' force_rm=''
     while [ $# -gt 0 ]; do
       case $1 in
         -t) tag=$2; shift 2 ;;
+        --force-rm) force_rm=1; shift ;;
         *) shift ;;
       esac
     done
     recipe=$(cat)
     printf '%s\n' "$recipe" >>"$root/dockerfiles.log"
     if [ -e "$root/fail-build" ]; then
+      if [ -z "$force_rm" ]; then
+        mkdir -p "$root/containers/build-failed-$$"
+      fi
       echo "Step 3/4 : RUN apt-get update && apt-get install ..."
       cat "$root/fail-build"
       echo "The command '/bin/sh -c apt-get update' returned a non-zero code: 100" >&2

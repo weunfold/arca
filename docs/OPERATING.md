@@ -5113,7 +5113,8 @@ neither has been measured on the pool itself.
   the list: a workflow sets up the version it wants with `actions/setup-node`, and the runner carries its own for
   JavaScript actions. A build that fails (a mirror that cannot be reached, a name that is not a package) is said in
   `service_logs`, with the image, the step and the package manager's last lines; no runner starts until a build
-  succeeds, and it is tried again every minute. Docker's whole output is in
+  succeeds; while it keeps failing it is tried again after a minute, then two, four and so on, up to five minutes,
+  and each failed attempt's stopped container is removed. Docker's whole output is in
   `/var/log/arca-runner-pool/runner-image-build.log` inside the machine. The packages come from Ubuntu's archive on
   the day of the build, so two machines built on different days can differ in their versions; the runner image
   underneath is the pinned one.
@@ -5141,10 +5142,13 @@ neither has been measured on the pool itself.
   may have taken, delete the App's key (or the token) on GitHub: that, not Arca, makes it worthless.
 - **Stopping and restarting.** `instance_stop` and `instance_restart` need your approval. Runners that are idle are
   taken off GitHub first; a job that is running is lost and GitHub reports it as failed, because the machine's
-  Docker stops with it. After the machine Arca runs on restarts, the pool starts by itself. The controller alone
-  restarting inside a running machine (its service is restarted after a crash, for example) cuts no job short: a
-  runner at its job is left to finish it, the controller that starts next watches it to its end and records it, and
-  only then is its slot given a new runner, from the runner image of that controller.
+  Docker stops with it. After the machine Arca runs on restarts, the pool starts by itself. An orderly stop or
+  restart of the controller service alone, inside a running machine, leaves a runner at its job to finish it: the
+  controller leaves it running, the controller that starts next watches it to its end and records its job, and only
+  then is its slot given a new runner, from the runner image of that controller. That is for an orderly stop only.
+  A crash, an out-of-memory kill or a stop of the machine can lose a running job: a controller that dies before it
+  writes the note leaves the next one nothing to adopt, and a stopped machine takes its Docker with it, so GitHub
+  reports the job as failed.
 - **Pins, and what you are trusting.** The runner is `ghcr.io/actions/actions-runner` 2.338.2 and the slot's daemon is
   `docker` 29.9.3-dind, both by digest: the bytes are fixed. The virtual machine is `images:debian/13/cloud`, the
   public Debian 13 image with cloud-init (which runs the first boot and grows the disk), named by its alias and not by

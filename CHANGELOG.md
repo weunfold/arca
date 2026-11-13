@@ -11,9 +11,10 @@ The `github-runner-pool` controller builds one runner image on its machine befor
 runner image with the Ubuntu packages of a new setting, `aptPackages` (by default `libatomic1` and `build-essential`,
 which GitHub's `ubuntu-latest` has and the runner image lacks; settable at create), and every runner starts from it.
 A build that fails is said in `service_logs` with the step and the package manager's last lines, no runner starts
-without the image, and it is tried again every minute. A runner at its job when the controller itself restarts inside
-the machine is left to finish it, and the next controller records it. A pool that exists keeps the script and the
-settings it was created with: it gets neither until it is created again.
+without the image, and it is tried again after a minute, then less and less often (up to five minutes). An orderly
+stop or restart of the controller inside the machine leaves a runner at its job to finish it, and the next controller
+records it; a crash or an out-of-memory kill can lose the job. A pool that exists keeps the script and the settings it
+was created with: it gets neither until it is created again.
 
 ## 0.29.0 (2026-11-13)
 

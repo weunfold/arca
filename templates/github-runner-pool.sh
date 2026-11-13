@@ -51,7 +51,7 @@ set -u
 : "${POOL_JOBS_MAX:=4194304}"  # bytes of jobs.tsv before it is set aside as jobs.tsv.1
 : "${POOL_STATUS_JOBS:=10}"    # finished jobs repeated in each status block
 : "${POOL_GROUP_EVERY:=600}"   # seconds between two reads of the runner group (or the repository) on GitHub
-: "${POOL_BUILD_RETRY:=60}"    # seconds between two tries at building the runner image with its packages
+: "${POOL_BUILD_RETRY:=60}"    # seconds before the first retry at building the runner image with its packages
 
 INSTALLED=/usr/local/sbin/arca-runner-pool
 
@@ -591,6 +591,18 @@ job_began() {
   case $at in '' | *[!0-9]*) now ;; *) echo "$at" ;; esac
 }
 
+# When a runner's container ended, as seconds: Docker's own FinishedAt, which is when the runner exited, not when this
+# controller next looked. A runner watched to its end by a later controller than the one that started it may have
+# ended long before that look, and that gap is no part of its job. Now, when Docker gives no time: a container already
+# removed, or an old Docker that does not say.
+runner_finished() {
+  local at
+  at=$(docker inspect -f '{{.State.FinishedAt}}' "$1" 2>/dev/null) || { now; return 0; }
+  case $at in '' | 0001-01-01T00:00:00Z) now; return 0 ;; esac
+  at=$(date -u -d "$at" +%s 2>/dev/null) || { now; return 0; }
+  case $at in '' | -*) now ;; *[!0-9]*) now ;; *) echo "$at" ;; esac
+}
+
 # A failure that is the pool's own, not a job's: it is counted, said, and makes every slot pause longer before the
 # next registration, up to POOL_BACKOFF_MAX.
 slot_failed() {
@@ -842,7 +854,7 @@ slot_cycle() {
   fi
 
   code=${state##* }
-  finished=$(now)
+  finished=$(runner_finished "$runner")
   # A job shorter than one look is still found in the runner's own lines, with the time it began.
   lines=$(docker logs "$runner" 2>&1)
   if [ -z "$busy_since" ] && [[ $lines == *'Running job: '* ]]; then
@@ -1040,7 +1052,10 @@ prepare_images() {
 # digest of what it is built from, so a machine that has it already builds nothing, and one built from anything else
 # is never taken for it. With no packages it is the pinned runner image itself. Nothing is pulled or built for a slot:
 # the controller builds it before any slot is begun, and no slot is begun without it. A build that fails is said, with
-# the step and the package manager's last words, and tried again after POOL_BUILD_RETRY seconds.
+# the step and the package manager's last words, and tried again after $BUILD_PAUSE seconds: POOL_BUILD_RETRY at
+# first, twice as long after each failure, up to POOL_BACKOFF_MAX. The build runs with --force-rm: on this machine
+# Docker has no buildx, so its legacy builder keeps a failed step's container unless it is told to remove it, and that
+# container carries no label of this pool for clean_containers to find.
 build_runner_image() {
   local recipe tag out
   RUNNER_RUN_IMAGE=''
@@ -1058,7 +1073,7 @@ build_runner_image() {
   fi
   say "building the runner image $tag: $RUNNER_IMAGE with apt-get install $APT_PACKAGES"
   out="$POOL_LOGS/runner-image-build.log"
-  if printf '%s\n' "$recipe" | docker build -t "$tag" - >"$out" 2>&1 && docker image inspect "$tag" >/dev/null 2>&1; then
+  if printf '%s\n' "$recipe" | docker build --force-rm -t "$tag" - >"$out" 2>&1 && docker image inspect "$tag" >/dev/null 2>&1; then
     say "the runner image $tag is built: every new runner starts from it"
     RUNNER_RUN_IMAGE=$tag
     return 0
@@ -1068,7 +1083,7 @@ build_runner_image() {
     [ -n "$line" ] || continue
     words="${words:+$words | }$(plain "$line")"
   done < <(grep -v '^[[:space:]]*$' "$out" 2>/dev/null | tail -n 3)
-  say "the runner image $tag could not be built (docker build FROM $RUNNER_IMAGE, step apt-get install $APT_PACKAGES): ${words:-docker said nothing}. No runner starts without it; it is tried again in $POOL_BUILD_RETRY seconds. Docker's whole output is in $out inside the machine; aptPackages is fixed at create"
+  say "the runner image $tag could not be built (docker build FROM $RUNNER_IMAGE, step apt-get install $APT_PACKAGES): ${words:-docker said nothing}. No runner starts without it; it is tried again in $BUILD_PAUSE seconds. Docker's whole output is in $out inside the machine; aptPackages is fixed at create"
   return 1
 }
 
@@ -1546,10 +1561,14 @@ pool() {
     ! stopping || return 0
   done
   ! stopping || return 0
+  BUILD_PAUSE=$POOL_BUILD_RETRY
+  [ "$BUILD_PAUSE" -le "$POOL_BACKOFF_MAX" ] || BUILD_PAUSE=$POOL_BACKOFF_MAX
   until build_runner_image; do
     ! stopping || return 0
-    nap "$POOL_BUILD_RETRY"
+    nap "$BUILD_PAUSE"
     ! stopping || return 0
+    BUILD_PAUSE=$((BUILD_PAUSE * 2))
+    [ "$BUILD_PAUSE" -le "$POOL_BACKOFF_MAX" ] || BUILD_PAUSE=$POOL_BACKOFF_MAX
   done
   # A stop is read after every wait and every pause below, before anything else is begun: GitHub is not asked again.
   ! stopping || return 0
