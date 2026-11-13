@@ -7,6 +7,14 @@ What changed in each release of Automagik Arca, in plain words. The newest relea
 <!-- The release writes the next section here by itself: one line per change that landed, from its commit subject.
 Write under this comment only what a reader needs beyond those lines; the release puts its heading above it. -->
 
+The `github-runner-pool` controller builds one runner image on its machine before it begins any slot: the pinned
+runner image with the Ubuntu packages of a new setting, `aptPackages` (by default `libatomic1` and `build-essential`,
+which GitHub's `ubuntu-latest` has and the runner image lacks; settable at create), and every runner starts from it.
+A build that fails is said in `service_logs` with the step and the package manager's last lines, no runner starts
+without the image, and it is tried again every minute. A runner at its job when the controller itself restarts inside
+the machine is left to finish it, and the next controller records it. A pool that exists keeps the script and the
+settings it was created with: it gets neither until it is created again.
+
 ## 0.29.0 (2026-11-13)
 
 A function whose `command` is a shell and its script (`["/bin/sh", "-c", <script>]`) now starts on a node whose Incus

@@ -41,6 +41,9 @@ const RUNNER_IMAGE: &str = "registry.example/runner@sha256:111111111111111111111
 const DOCKER_IMAGE: &str =
     "registry.example/dind@sha256:2222222222222222222222222222222222222222222222222222222222222222";
 const GIB: u64 = 1 << 30;
+/// The local name of the image every runner of a test pool starts from: the runner image with its packages added,
+/// built on the machine, named for the pool's id. What follows the colon is a digest of the recipe.
+const RUNNER_TAG: &str = "arca-runner-pool-abcd1234:";
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1472,7 +1475,9 @@ fn an_app_registers_a_fresh_runner_per_job_replaces_it_and_prints_no_credential(
     for run in &runs {
         let daemon = run.contains(DOCKER_IMAGE);
         assert_eq!(run.contains("--privileged"), daemon, "{run}");
-        assert_eq!(run.contains(RUNNER_IMAGE), !daemon, "{run}");
+        // A runner starts from the pool's own runner image, never from the pinned image as it is.
+        assert_eq!(run.contains(&format!(" {RUNNER_TAG}")), !daemon, "{run}");
+        assert!(!run.contains(RUNNER_IMAGE), "{run}");
         assert!(run.contains("--cgroup-parent arcapool-s"), "{run}");
         assert!(run.contains("--label arca.pool=pool1"), "{run}");
         // The runner and its daemon share one layered copy of the runner's files, at the runner's own path: the
@@ -1929,7 +1934,7 @@ fn failures_are_counted_said_without_the_credential_and_paused_and_leftovers_are
     let calls = pool.read("docker/calls.log");
     let last_runner = calls
         .lines()
-        .rfind(|line| line.starts_with("run ") && line.contains(RUNNER_IMAGE))
+        .rfind(|line| line.starts_with("run ") && line.contains(RUNNER_TAG))
         .expect("a runner");
     assert!(!last_runner.contains(":/home/runner "), "{last_runner}");
     let last_daemon = calls
@@ -2201,6 +2206,12 @@ fn the_shipped_template_is_a_virtual_machine_with_its_script_its_secrets_and_pin
     }
     let settings = template.settings.as_ref().expect("settings");
     assert_eq!(settings["url"], "https://github.com/example-org");
+    // What GitHub's ubuntu-latest has and the pinned runner image lacks: libatomic1, and make, gcc and g++. Node.js is
+    // not added: a job sets up its own.
+    assert_eq!(
+        settings["aptPackages"],
+        json!(["libatomic1", "build-essential"])
+    );
     // Both images are pinned by digest, and the description names the releases the digests are of.
     for key in ["runnerImage", "dockerImage"] {
         let image = settings[key].as_str().expect("an image");
@@ -2531,7 +2542,7 @@ fn a_runner_github_tells_to_update_updates_inside_its_container_and_then_takes_i
     wait_for(&pool, "a runner without the layer", || {
         pool.read("docker/calls.log")
             .lines()
-            .rfind(|line| line.starts_with("run ") && line.contains(RUNNER_IMAGE))
+            .rfind(|line| line.starts_with("run ") && line.contains(RUNNER_TAG))
             .is_some_and(|run| !run.contains(":/home/runner "))
     });
     assert_eq!(pool.output().matches("with its files layered").count(), 1);
@@ -4171,5 +4182,327 @@ fn a_runner_that_updated_before_it_was_asked_and_stops_after_an_unclear_answer_i
     assert!(!output.contains("after it had updated itself"), "{output}");
     assert!(totals(&pool).contains(" failures=0 "), "{}", totals(&pool));
     assert_eq!(pool.stop(), Some(0));
+    let _ = fs::remove_dir_all(scratch);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The runner image with its packages
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// The recipe the controller builds the runner image from, for these packages.
+fn recipe(packages: &str) -> String {
+    format!(
+        "FROM {RUNNER_IMAGE}\nUSER root\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {packages} && rm -rf /var/lib/apt/lists/*\nUSER runner\n"
+    )
+}
+
+/// The `docker build` calls the controller made.
+fn builds(pool: &Pool) -> Vec<String> {
+    pool.read("docker/calls.log")
+        .lines()
+        .filter(|line| line.starts_with("build "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The `docker run` calls that started a runner, as opposed to a slot's Docker daemon.
+fn runner_runs(pool: &Pool) -> Vec<String> {
+    pool.read("docker/calls.log")
+        .lines()
+        .filter(|line| line.starts_with("run ") && line.contains("--name pool1-s0-run "))
+        .map(str::to_string)
+        .collect()
+}
+
+/// The controller builds one image from the pinned runner image with the default packages before it begins any slot,
+/// every runner starts from that image, and a controller that starts again on the same machine builds nothing.
+#[test]
+fn the_runner_image_is_built_once_from_the_pinned_image_with_the_default_packages_and_every_runner_starts_from_it()
+ {
+    let scratch = scratch_dir();
+    let github = Github::start(&scratch, &format!("/orgs/{ORG}"));
+    // The settings say nothing of packages, as those of a pool created before the setting existed: the default holds.
+    let mut pool = one_slot_pool(&github, |settings| {
+        assert!(settings.get("aptPackages").is_none());
+    });
+    pool.start(&github);
+    wait_for(&pool, "an idle runner", || github.live().len() == 1);
+    github.queue(&["arca"], "needs a compiler", 0.2);
+    wait_for(&pool, "the job", || pool.jobs().len() == 1);
+    wait_for(&pool, "a second runner", || {
+        github.registrations().len() >= 2 && github.live().len() == 1
+    });
+    // One build, from the pinned runner image, with libatomic1 and build-essential, under the pool's own name.
+    let built = builds(&pool);
+    assert_eq!(built.len(), 1, "{built:?}");
+    let tag = built[0]
+        .strip_prefix("build -t ")
+        .and_then(|rest| rest.strip_suffix(" -"))
+        .expect("a build of one name, its recipe on the standard input")
+        .to_string();
+    let digest = tag.strip_prefix(RUNNER_TAG).expect("the pool's own name");
+    assert!(
+        digest.len() == 16 && digest.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{tag}"
+    );
+    assert_eq!(
+        pool.read("docker/dockerfiles.log"),
+        recipe("libatomic1 build-essential")
+    );
+    // It was built before any slot was begun, and both runners started from it.
+    let calls = pool.read("docker/calls.log");
+    let lines: Vec<&str> = calls.lines().collect();
+    let build_at = lines
+        .iter()
+        .position(|line| line.starts_with("build "))
+        .expect("the build");
+    let first_run = lines
+        .iter()
+        .position(|line| line.starts_with("run "))
+        .expect("a run");
+    assert!(build_at < first_run, "{calls}");
+    let runs = runner_runs(&pool);
+    assert!(runs.len() >= 2, "{runs:?}");
+    for run in &runs {
+        assert!(run.contains(&format!(" {tag} /bin/bash -c ")), "{run}");
+        assert!(!run.contains(RUNNER_IMAGE), "{run}");
+    }
+    assert!(pool.output().contains(&format!(
+        "the runner image {tag} is built: every new runner starts from it"
+    )));
+    assert_eq!(pool.jobs()[0][5], "Succeeded");
+    assert_eq!(pool.stop(), Some(0));
+
+    // A controller that starts again finds the image and builds nothing; its runners start from the same image.
+    pool.start(&github);
+    wait_for(&pool, "a runner after the restart", || {
+        runner_runs(&pool).len() > runs.len() && github.live().len() == 1
+    });
+    assert_eq!(builds(&pool).len(), 1);
+    assert!(!pool.output().contains("building the runner image"));
+    assert!(
+        runner_runs(&pool)
+            .last()
+            .is_some_and(|run| run.contains(&format!(" {tag} /bin/bash -c ")))
+    );
+    assert_eq!(pool.stop(), Some(0));
+    let _ = fs::remove_dir_all(scratch);
+}
+
+/// aptPackages given at create replaces the default; an empty list runs the pinned image as it is; a list that names
+/// no package is said in words and nothing is registered.
+#[test]
+fn the_packages_an_operator_names_are_the_ones_installed_and_an_empty_list_adds_none() {
+    let scratch = scratch_dir();
+    let github = Github::start(&scratch, &format!("/orgs/{ORG}"));
+    let mut pool = one_slot_pool(&github, |settings| {
+        settings["aptPackages"] = json!([
+            "libatomic1",
+            "build-essential",
+            "zstd",
+            "libssl-dev=3.0.13-0ubuntu3"
+        ]);
+    });
+    pool.start(&github);
+    wait_for(&pool, "an idle runner", || github.live().len() == 1);
+    assert_eq!(builds(&pool).len(), 1);
+    assert_eq!(
+        pool.read("docker/dockerfiles.log"),
+        recipe("libatomic1 build-essential zstd libssl-dev=3.0.13-0ubuntu3")
+    );
+    let run = runner_runs(&pool).pop().expect("a runner");
+    assert!(run.contains(&format!(" {RUNNER_TAG}")), "{run}");
+    assert!(!run.contains(RUNNER_IMAGE), "{run}");
+    assert_eq!(pool.stop(), Some(0));
+    drop(pool);
+
+    // Another list is another image: the name follows what it is built from.
+    let mut other = one_slot_pool(&github, |settings| {
+        settings["aptPackages"] = json!(["libatomic1"]);
+    });
+    other.start(&github);
+    wait_for(&other, "an idle runner", || github.live().len() == 1);
+    assert_eq!(other.read("docker/dockerfiles.log"), recipe("libatomic1"));
+    assert_eq!(other.stop(), Some(0));
+    drop(other);
+
+    let mut plain = one_slot_pool(&github, |settings| {
+        settings["aptPackages"] = json!([]);
+    });
+    plain.start(&github);
+    wait_for(&plain, "an idle runner", || github.live().len() == 1);
+    assert!(builds(&plain).is_empty());
+    let run = runner_runs(&plain).pop().expect("a runner");
+    assert!(
+        run.contains(&format!(" {RUNNER_IMAGE} /bin/bash -c ")),
+        "{run}"
+    );
+    assert_eq!(plain.stop(), Some(0));
+    drop(plain);
+
+    let registered = github.registrations().len();
+    for wrong in [
+        json!(["Build-Essential"]),
+        json!(["make; reboot"]),
+        json!(["make\nRUN reboot"]),
+        json!(["*"]),
+        json!([""]),
+        json!(["-o"]),
+        json!("build-essential"),
+        json!([7]),
+    ] {
+        let mut pool = one_slot_pool(&github, |settings| {
+            settings["aptPackages"] = wrong.clone();
+        });
+        pool.start(&github);
+        wait_for(&pool, "the words for the setting", || {
+            pool.output()
+                .contains("settings: aptPackages is a list of at most 64 Ubuntu package names")
+        });
+        // A pool whose settings cannot be used ends with 1 at its stop, as for every other setting.
+        assert_eq!(pool.stop(), Some(1), "{wrong}");
+        assert!(builds(&pool).is_empty(), "{wrong}");
+    }
+    assert_eq!(github.registrations().len(), registered);
+    let _ = fs::remove_dir_all(scratch);
+}
+
+/// A build that fails is said, with the image, the step and the package manager's own words, and no runner is
+/// registered or started while there is no image. It is tried again, and the pool starts once a build succeeds.
+#[test]
+fn a_runner_image_that_cannot_be_built_is_said_and_no_runner_starts_on_it() {
+    let scratch = scratch_dir();
+    let github = Github::start(&scratch, &format!("/orgs/{ORG}"));
+    let mut pool = one_slot_pool(&github, |_| {});
+    pool.env.push(("POOL_BUILD_RETRY", "1".to_string()));
+    fs::write(
+        pool.dir.join("docker/fail-build"),
+        "E: Unable to locate package libatomic1\n",
+    )
+    .expect("a build that fails");
+    pool.start(&github);
+    wait_for(&pool, "two builds that failed", || builds(&pool).len() >= 2);
+    let output = pool.output();
+    assert!(
+        output.contains(&format!(
+            "could not be built (docker build FROM {RUNNER_IMAGE}, step apt-get install libatomic1 build-essential): "
+        )),
+        "{output}"
+    );
+    assert!(
+        output.contains("E: Unable to locate package libatomic1"),
+        "{output}"
+    );
+    assert!(output.contains("returned a non-zero code: 100"), "{output}");
+    assert!(
+        output.contains("No runner starts without it; it is tried again in 1 seconds"),
+        "{output}"
+    );
+    assert!(output.contains(&format!(
+        "{}/runner-image-build.log",
+        pool.dir.join("logs").display()
+    )));
+    // Nothing was begun: no runner on GitHub, no container, no slot.
+    assert!(github.registrations().is_empty());
+    assert!(runner_runs(&pool).is_empty());
+    assert!(
+        !pool
+            .read("docker/calls.log")
+            .lines()
+            .any(|line| line.starts_with("run ")),
+        "{}",
+        pool.read("docker/calls.log")
+    );
+    assert_eq!(pool.containers(), Vec::<String>::new());
+
+    // The mirror answers again: the next try builds it, and the runners start from it.
+    fs::remove_file(pool.dir.join("docker/fail-build")).expect("the build may succeed");
+    wait_for(&pool, "an idle runner", || github.live().len() == 1);
+    let run = runner_runs(&pool).pop().expect("a runner");
+    assert!(run.contains(&format!(" {RUNNER_TAG}")), "{run}");
+    assert_eq!(pool.stop(), Some(0));
+    let _ = fs::remove_dir_all(scratch);
+}
+
+/// A runner at its job when the controller stops is left to finish it: its containers are not removed and GitHub is
+/// not asked to take it off. The controller that starts next watches it to its end, records its job, and only then
+/// gives the slot a fresh runner, from its own runner image. The fake runner lives in a session of its own here, as a
+/// container outlives the controller that started it.
+#[test]
+fn a_job_that_runs_when_the_controller_restarts_runs_to_its_end_and_is_recorded() {
+    let scratch = scratch_dir();
+    let github = Github::start(&scratch, &format!("/orgs/{ORG}"));
+    let mut pool = one_slot_pool(&github, |_| {});
+    pool.env.push(("FAKE_DETACH", "1".to_string()));
+    pool.start(&github);
+    wait_for(&pool, "an idle runner", || github.live().len() == 1);
+    let runner = github.live()[0].clone();
+    github.queue(&["arca"], "a long job", 10.0);
+    wait_for(&pool, "the slot shown as busy", || {
+        pool.read("run/slots/0").starts_with("busy\t")
+    });
+    assert_eq!(pool.stop(), Some(0));
+    let first = pool.output();
+    assert!(
+        first.contains(
+            "slot 0 (small): its runner is at its job \"a long job\" and is left to finish it"
+        ),
+        "{first}"
+    );
+    // The job's containers are there, its note is on the slot's disk, and GitHub still has its runner.
+    assert_eq!(pool.containers(), ["pool1-s0-dind", "pool1-s0-run"]);
+    assert!(pool.dir.join("state/slots/0/kept").is_file());
+    assert!(github.deletes().is_empty());
+    let before = pool.read("docker/calls.log").lines().count();
+
+    pool.start(&github);
+    wait_for(&pool, "the job recorded by the next controller", || {
+        pool.jobs().len() == 1
+    });
+    let job = &pool.jobs()[0];
+    assert_eq!(
+        (job[4].as_str(), job[5].as_str()),
+        ("a long job", "Succeeded")
+    );
+    let seconds: u64 = job[6].parse().expect("seconds");
+    assert!(seconds >= 9, "timed from when it began: {seconds}");
+    assert!(pool.output().contains(&format!(
+        "slot 0 (small): the runner {} was left at its job \"a long job\" when the controller before this one stopped",
+        runner.name
+    )));
+    // The runner ended its job by itself and told GitHub so: its container was never removed under it.
+    {
+        let state = github.state();
+        let ran = state
+            .runners
+            .iter()
+            .find(|r| r.id == runner.id)
+            .expect("the runner");
+        assert!(ran.done && !ran.deleted, "{ran:?}");
+        assert!(state.finished.contains(&runner.name));
+    }
+    let after: Vec<String> = pool
+        .read("docker/calls.log")
+        .lines()
+        .skip(before)
+        .map(str::to_string)
+        .collect();
+    assert!(
+        !after
+            .iter()
+            .any(|call| call.starts_with("rm ") && call.contains("id-pool1-s0-")),
+        "the next controller did not clear the job's containers away: {after:?}"
+    );
+    // Then the slot has a fresh runner, from the runner image with its packages.
+    wait_for(&pool, "a fresh runner", || {
+        github.live().iter().any(|live| live.id != runner.id)
+    });
+    assert!(!pool.dir.join("state/slots/0/kept").exists());
+    let run = runner_runs(&pool).pop().expect("a runner");
+    assert!(run.contains(&format!(" {RUNNER_TAG}")), "{run}");
+    // An idle runner is still taken off GitHub at a stop, and nothing is left.
+    assert_eq!(pool.stop(), Some(0));
+    assert_eq!(pool.containers(), Vec::<String>::new());
+    assert!(!pool.dir.join("state/slots/0/kept").exists());
     let _ = fs::remove_dir_all(scratch);
 }

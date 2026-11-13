@@ -51,6 +51,7 @@ set -u
 : "${POOL_JOBS_MAX:=4194304}"  # bytes of jobs.tsv before it is set aside as jobs.tsv.1
 : "${POOL_STATUS_JOBS:=10}"    # finished jobs repeated in each status block
 : "${POOL_GROUP_EVERY:=600}"   # seconds between two reads of the runner group (or the repository) on GitHub
+: "${POOL_BUILD_RETRY:=60}"    # seconds between two tries at building the runner image with its packages
 
 INSTALLED=/usr/local/sbin/arca-runner-pool
 
@@ -66,6 +67,11 @@ fold head id install mkdir mount mv od rm sha256sum sleep stat tail tee touch tr
 # util-linux. The ones the image already carries are named too, so the list says what the script
 # stands on.
 POOL_PACKAGES='docker.io docker-cli curl jq openssl ca-certificates util-linux mount coreutils hostname'
+# The Ubuntu packages added to the runner image when the settings name none (aptPackages): what GitHub's own
+# ubuntu-latest has and the pinned runner image lacks. libatomic1 is what Node.js-based tools such as pnpm load;
+# build-essential is make, gcc and g++. Node.js is not one: a job sets up its own (actions/setup-node), and the runner
+# carries its own for JavaScript actions.
+POOL_RUNNER_PACKAGES='libatomic1 build-essential'
 # The runner image's own user and docker group (the image fixes both).
 RUNNER_UID=1001
 DOCKER_GID=123
@@ -307,6 +313,21 @@ load_settings() {
     say "settings: runnerImage and dockerImage are required"
     return 1
   fi
+  # The Ubuntu packages added to the runner image (see build_runner_image). A pool whose settings were written before
+  # the setting existed gets the default. Each name is checked whole, every character of it, before the names are
+  # joined: they go into the image's recipe.
+  local package
+  if [ "$(jq -r 'has("aptPackages")' "$POOL_SETTINGS")" = true ]; then
+    APT_PACKAGES=$(jq -r '.aptPackages | if type == "array" and length <= 64 and all(.[]; type == "string" and length >= 1 and length <= 100 and (test("[^a-z0-9+.:=~-]") | not)) then join(" ") else "-" end' "$POOL_SETTINGS" 2>/dev/null) || APT_PACKAGES='-'
+  else
+    APT_PACKAGES=$POOL_RUNNER_PACKAGES
+  fi
+  case $APT_PACKAGES in *[!a-z0-9+.:=~\ -]*) APT_PACKAGES='-' ;; esac
+  for package in $APT_PACKAGES; do
+    case $package in [a-z0-9]*) continue ;; esac
+    say "settings: aptPackages is a list of at most 64 Ubuntu package names, such as libatomic1 or build-essential (letters a-z, digits and + . : = ~ -, beginning with a letter or digit), or an empty list for the runner image as it is"
+    return 1
+  done
   RESERVE=$reserve
   local name labels labels_json cpu memory slots bytes n
   while IFS=$'\t' read -r name labels labels_json cpu memory slots; do
@@ -604,7 +625,7 @@ slot_reap() {
   docker rm -fv "$runner" "$daemon" >/dev/null 2>&1
   # Whatever is left in the slot's slice ends with it, and its memory peak starts from nothing for the next job.
   systemctl stop "$(slot_slice "$slot")" >/dev/null 2>&1
-  rm -rf "${dir:?}/work" "${dir:?}/sock" "${POOL_RUN:?}/jit/$slot"
+  rm -rf "${dir:?}/work" "${dir:?}/sock" "${POOL_RUN:?}/jit/$slot" "${dir:?}/kept"
   unlayer_home "$slot"
   used=$(du -sb "$dir/toolcache" "$dir/cache" 2>/dev/null | awk '{ total += $1 } END { print total + 0 }')
   if [ "${used:-0}" -gt "$DEPENDENCY_BUDGET" ]; then
@@ -613,28 +634,16 @@ slot_reap() {
   fi
 }
 
-# One life of a slot: register a fresh runner, run it, record its job, clean up. It ends when the runner has gone, so
-# the controller starts the slot again with a new registration.
-slot_cycle() {
-  local slot=$1
-  local class=${SLOT_CLASS[$slot]} dir runner daemon slice token name body jit runner_id tries state code
-  local started busy_since='' job='' result='' peak cpu seconds finished cgroup updating='' layered='' home=() lines
-  local retired='' asked=''
-  # A slot takes no signal. It reads the same line as the controller: a slot begun as the controller is told to stop
-  # finds the stop at once.
-  trap - TERM INT
-  dir=$(slot_dir "$slot")
-  runner="$POOL_NAME-s$slot-run"
-  daemon="$POOL_NAME-s$slot-dind"
-  slice=$(slot_slice "$slot")
-  cgroup=$(slot_cgroup "$slot")
+# The first part of a slot's life: register a fresh runner and start it, with its own Docker daemon. It sets the
+# variables of the slot_cycle that calls it, and returns 1 when the slot ends here.
+slot_begin() {
   set_state "$slot" registering
 
   # A slot begun just as the controller was told to stop registers no runner.
-  ! stopping || return 0
+  ! stopping || return 1
   if ! github_token; then
     slot_failed "$slot" "$TOKEN_ERROR"
-    return 0
+    return 1
   fi
   token=$TOKEN
   TOKEN=''
@@ -645,14 +654,14 @@ slot_cycle() {
     # A token GitHub no longer takes is not kept.
     [ "$API_CODE" = 401 ] && rm -f "$POOL_RUN/token"
     slot_failed "$slot" "the runner was not registered: $API_ERROR"
-    return 0
+    return 1
   fi
   jit=$(jq -r '.encoded_jit_config // empty' "$API_OUT")
   runner_id=$(jq -r '.runner.id // empty' "$API_OUT")
   rm -f "$API_OUT"
   if [ -z "$jit" ]; then
     slot_failed "$slot" "GitHub registered the runner without a just-in-time configuration"
-    return 0
+    return 1
   fi
   rm -f "$POOL_RUN/backoff" "$POOL_RUN/backoff-until"
 
@@ -681,7 +690,7 @@ slot_cycle() {
     "$DOCKER_IMAGE" dockerd --host=unix:///var/run/docker.sock --group="$DOCKER_GID" >/dev/null 2>&1; then
     slot_abandon "$slot" "$runner_id"
     slot_failed "$slot" "the slot's Docker daemon could not be started"
-    return 0
+    return 1
   fi
   tries=0
   until docker exec "$daemon" docker info >/dev/null 2>&1; do
@@ -689,13 +698,13 @@ slot_cycle() {
     if stopping || [ "$tries" -gt "$POOL_READY_WAIT" ]; then
       slot_abandon "$slot" "$runner_id"
       stopping || slot_failed "$slot" "the slot's Docker daemon did not come up within $POOL_READY_WAIT seconds"
-      return 0
+      return 1
     fi
     nap 1
   done
-  # The runner: a fresh container from the pinned image, sharing the daemon's network so a job's service containers
-  # answer on localhost. Its own files, the bundled tools among them, are the image's and are writable and not a mount,
-  # so the runner can replace them when GitHub tells it to update itself. Its just-in-time configuration is a file on
+  # The runner: a fresh container from the pool's runner image (build_runner_image), sharing the daemon's network so
+  # a job's service containers answer on localhost. Its own files, the bundled tools among them, are the image's and
+  # are writable and not a mount, so the runner can replace them when GitHub tells it to update itself. Its just-in-time configuration is a file on
   # /run that the container's command reads into the runner's environment: Docker's record of the container holds the
   # path, never the configuration.
   mkdir -p "$POOL_RUN/jit"
@@ -714,13 +723,65 @@ slot_cycle() {
     -v "$POOL_RUN/jit/$slot:/run/arca/jitconfig:ro" \
     -v "$dir/sock:/var/run" "${home[@]}" -v "$dir/work:/home/runner/_work" \
     -v "$dir/toolcache:/opt/hostedtoolcache" -v "$dir/cache:/var/cache/pool" \
-    "$RUNNER_IMAGE" /bin/bash -c 'ACTIONS_RUNNER_INPUT_JITCONFIG=$(cat /run/arca/jitconfig) && export ACTIONS_RUNNER_INPUT_JITCONFIG && exec /home/runner/run.sh' >/dev/null 2>&1; then
+    "$RUNNER_RUN_IMAGE" /bin/bash -c 'ACTIONS_RUNNER_INPUT_JITCONFIG=$(cat /run/arca/jitconfig) && export ACTIONS_RUNNER_INPUT_JITCONFIG && exec /home/runner/run.sh' >/dev/null 2>&1; then
     slot_abandon "$slot" "$runner_id"
     slot_failed "$slot" "the runner container could not be started"
-    return 0
+    return 1
   fi
   started=$(now)
   set_state "$slot" idle "$name"
+}
+
+# The first part of the life of a slot whose runner an earlier controller left at its job (slot_keep): what that
+# controller knew of it is read back, and the slot watches the runner as if it had started it.
+slot_adopt() {
+  {
+    read -r name
+    read -r runner_id
+    read -r layered
+    read -r started
+    read -r busy_since
+    read -r job
+  } <"$dir/kept"
+  case $started in '' | *[!0-9]*) started=$(now) ;; esac
+  case $busy_since in '' | *[!0-9]*) busy_since=$started ;; esac
+  : "${job:=unknown}"
+  set_state "$slot" busy "$name job \"$job\""
+  say "slot $slot ($class): the runner $name was left at its job \"$job\" when the controller before this one stopped; it is watched to its end and its job recorded"
+}
+
+# Leaves a runner that is at its job running when the controller stops, with its daemon, its slice and its layered
+# files, and notes on the slot's disk what the next controller needs to watch it to its end (slot_adopt). Returns 1
+# when the runner is no longer running: the slot then cleans up as before.
+slot_keep() {
+  local now_state
+  now_state=$(docker inspect -f '{{.State.Running}} {{.State.ExitCode}}' "$runner" 2>/dev/null) || return 1
+  [ "${now_state%% *}" = true ] || return 1
+  printf '%s\n' "$name" "$runner_id" "$layered" "$started" "$busy_since" "$job" >"$dir/kept.new" &&
+    mv "$dir/kept.new" "$dir/kept" || return 1
+  say "slot $slot ($class): its runner is at its job \"$job\" and is left to finish it; the controller that starts next records it"
+}
+
+# One life of a slot: register a fresh runner, run it, record its job, clean up. It ends when the runner has gone, so
+# the controller starts the slot again with a new registration.
+slot_cycle() {
+  local slot=$1
+  local class=${SLOT_CLASS[$slot]} dir runner daemon slice token name body jit runner_id tries state code
+  local started busy_since='' job='' result='' peak cpu seconds finished cgroup updating='' layered='' home=() lines
+  local retired='' asked=''
+  # A slot takes no signal. It reads the same line as the controller: a slot begun as the controller is told to stop
+  # finds the stop at once.
+  trap - TERM INT
+  dir=$(slot_dir "$slot")
+  runner="$POOL_NAME-s$slot-run"
+  daemon="$POOL_NAME-s$slot-dind"
+  slice=$(slot_slice "$slot")
+  cgroup=$(slot_cgroup "$slot")
+  if [ "${2-}" = adopt ]; then
+    slot_adopt
+  else
+    slot_begin || return 0
+  fi
 
   while ! stopping; do
     state=$(docker inspect -f '{{.State.Running}} {{.State.ExitCode}}' "$runner" 2>/dev/null) || state='false 255'
@@ -766,7 +827,12 @@ slot_cycle() {
   fi
 
   if stopping; then
-    # The controller is stopping. A runner that has no job is taken off GitHub; one with a job is lost with it.
+    # The controller is stopping. A runner that has no job is taken off GitHub. One at its job is left to finish it,
+    # for the next controller to watch: no job is cut short by a restart of the controller.
+    if [ -n "$busy_since" ] && slot_keep; then
+      return 0
+    fi
+    rm -f "$dir/kept"
     [ -n "$busy_since" ] || slot_abandon "$slot" "$runner_id"
     docker rm -fv "$runner" "$daemon" >/dev/null 2>&1
     systemctl stop "$slice" >/dev/null 2>&1
@@ -905,7 +971,7 @@ slot_abandon() {
   local slot=$1 runner_id=$2
   docker rm -fv "$POOL_NAME-s$slot-run" "$POOL_NAME-s$slot-dind" >/dev/null 2>&1
   systemctl stop "$(slot_slice "$slot")" >/dev/null 2>&1
-  rm -f "$POOL_RUN/jit/$slot"
+  rm -f "$POOL_RUN/jit/$slot" "$(slot_dir "$slot")/kept"
   unlayer_home "$slot"
   case $runner_id in '' | *[!0-9]*) return 0 ;; esac
   github_token || return 0
@@ -969,6 +1035,43 @@ prepare_images() {
   fi
 }
 
+# The image every runner of this pool starts from, in $RUNNER_RUN_IMAGE: the pinned runner image with the packages of
+# aptPackages added, built once on this machine and kept under a local name of this pool's own. The name ends with a
+# digest of what it is built from, so a machine that has it already builds nothing, and one built from anything else
+# is never taken for it. With no packages it is the pinned runner image itself. Nothing is pulled or built for a slot:
+# the controller builds it before any slot is begun, and no slot is begun without it. A build that fails is said, with
+# the step and the package manager's last words, and tried again after POOL_BUILD_RETRY seconds.
+build_runner_image() {
+  local recipe tag out
+  RUNNER_RUN_IMAGE=''
+  if [ -z "$APT_PACKAGES" ]; then
+    RUNNER_RUN_IMAGE=$RUNNER_IMAGE
+    return 0
+  fi
+  # The image's own user is runner; the packages are installed as root, and the user is put back.
+  recipe=$(printf 'FROM %s\nUSER root\nRUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends %s && rm -rf /var/lib/apt/lists/*\nUSER runner\n' \
+    "$RUNNER_IMAGE" "$APT_PACKAGES")
+  tag="arca-runner-pool-$POOL_ID:$(printf '%s' "$recipe" | sha256sum | cut -c1-16)"
+  if docker image inspect "$tag" >/dev/null 2>&1; then
+    RUNNER_RUN_IMAGE=$tag
+    return 0
+  fi
+  say "building the runner image $tag: $RUNNER_IMAGE with apt-get install $APT_PACKAGES"
+  out="$POOL_LOGS/runner-image-build.log"
+  if printf '%s\n' "$recipe" | docker build -t "$tag" - >"$out" 2>&1 && docker image inspect "$tag" >/dev/null 2>&1; then
+    say "the runner image $tag is built: every new runner starts from it"
+    RUNNER_RUN_IMAGE=$tag
+    return 0
+  fi
+  local words='' line
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    words="${words:+$words | }$(plain "$line")"
+  done < <(grep -v '^[[:space:]]*$' "$out" 2>/dev/null | tail -n 3)
+  say "the runner image $tag could not be built (docker build FROM $RUNNER_IMAGE, step apt-get install $APT_PACKAGES): ${words:-docker said nothing}. No runner starts without it; it is tried again in $POOL_BUILD_RETRY seconds. Docker's whole output is in $out inside the machine; aptPackages is fixed at create"
+  return 1
+}
+
 # Gives a slot's runner and its Docker daemon one fresh, writable copy of the runner's files to share: the pinned
 # image's files as the read-only lower layer of an overlay, and an empty upper layer that lives for one job. Both
 # containers mount it at the runner's own path, so when a runner updates itself the daemon sees the new bundled tools
@@ -1007,15 +1110,44 @@ plain_home() {
   say "$1. Runners start with their image's own files from now on; after a runner updates itself, a job that runs in a container (container:) still gets the pinned release's bundled tools"
 }
 
-# The containers an earlier controller left on this machine.
+# The slots whose runner an earlier controller left at its job when it stopped (slot_keep), in ADOPT: those whose note
+# is on disk and whose runner container is still there, running or ended. A note without its container is dropped.
+find_kept() {
+  local slot
+  ADOPT=()
+  for ((slot = 0; slot < SLOTS; slot++)); do
+    [ -e "$(slot_dir "$slot")/kept" ] || continue
+    if docker inspect -f '{{.State.Running}} {{.State.ExitCode}}' "$POOL_NAME-s$slot-run" >/dev/null 2>&1; then
+      ADOPT[slot]=1
+    else
+      rm -f "$(slot_dir "$slot")/kept"
+    fi
+  done
+}
+
+# The containers an earlier controller left on this machine, but for those of a runner left at its job: it is watched
+# to its end (find_kept), with its slice and its layered files.
 clean_containers() {
-  local ids
-  ids=$(docker ps -aq --filter "label=arca.pool=$POOL_NAME" 2>/dev/null)
+  local ids='' id name slot
+  while read -r id name; do
+    case $name in "$POOL_NAME"-s*-run | "$POOL_NAME"-s*-dind)
+      slot=${name#"$POOL_NAME"-s}
+      slot=${slot%-*}
+      case $slot in '' | *[!0-9]*) ;; *) [ -z "${ADOPT[$slot]:-}" ] || continue ;; esac
+      ;;
+    esac
+    ids="$ids $id"
+  done < <(docker ps -a --filter "label=arca.pool=$POOL_NAME" --format '{{.ID}} {{.Names}}' 2>/dev/null)
   # shellcheck disable=SC2086
   [ -z "$ids" ] || docker rm -fv $ids >/dev/null 2>&1
-  systemctl stop 'arcapool-s*.slice' >/dev/null 2>&1
-  local slot
-  for ((slot = 0; slot < SLOTS; slot++)); do unlayer_home "$slot"; done
+  if [ ${#ADOPT[@]} = 0 ]; then
+    systemctl stop 'arcapool-s*.slice' >/dev/null 2>&1
+  fi
+  for ((slot = 0; slot < SLOTS; slot++)); do
+    [ -z "${ADOPT[$slot]:-}" ] || continue
+    [ ${#ADOPT[@]} = 0 ] || systemctl stop "$(slot_slice "$slot")" >/dev/null 2>&1
+    unlayer_home "$slot"
+  done
 }
 
 # The runners an earlier controller of this pool left on GitHub: those GitHub lists as offline whose whole name is one
@@ -1413,8 +1545,15 @@ pool() {
     nap 30
     ! stopping || return 0
   done
+  ! stopping || return 0
+  until build_runner_image; do
+    ! stopping || return 0
+    nap "$POOL_BUILD_RETRY"
+    ! stopping || return 0
+  done
   # A stop is read after every wait and every pause below, before anything else is begun: GitHub is not asked again.
   ! stopping || return 0
+  find_kept
   clean_containers
   # No slot starts before GitHub takes the credential: a wrong one is said here, once per pause, not once per slot.
   local pause=0
@@ -1466,6 +1605,12 @@ pool() {
   RETIRE_PAUSE=0
   RETIRE_AFTER=0
   local slot live reserved pending available next=0 first n last_status=0 until_at at class_live=() round=()
+  # The runners an earlier controller left at their jobs are watched to their end as slots of this one, before any
+  # new slot is begun: they hold their places and their memory.
+  for slot in "${!ADOPT[@]}"; do
+    slot_cycle "$slot" adopt &
+    PIDS[slot]=$!
+  done
   while ! stopping; do
     live=0
     reserved=0
@@ -1556,7 +1701,7 @@ pool() {
 
   # The slots have read the same line: each is cleaning up already. They are sent no signal, which would end them
   # in the middle of it.
-  say "stopping: runners without a job are taken off GitHub, and a job that is running is lost"
+  say "stopping: runners without a job are taken off GitHub, and a runner at its job is left to finish it: the controller that starts next records it"
   local deadline=$(($(now) + POOL_STOP_WAIT))
   for slot in "${!PIDS[@]}"; do
     [ -n "${PIDS[$slot]}" ] || continue

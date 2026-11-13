@@ -4916,6 +4916,7 @@ since it is where the pool's credential will be used.
 | `runnerGroupId` | yes | The number of the runner group the runners join (step 1). Not used for a repository. |
 | `classes` | yes | The label sets, each with its slot size: `name` (a-z, 0-9), `labels` (what a job's `runs-on` asks for), `cpu`, `memory` and `slots` (how many runners of this class the pool keeps). Given at create, it replaces the whole list. Each class is checked like the template's first: whole numbers for `cpu` and `slots`, and a `memory` above zero and at most the machine's. The card shows one row a class. |
 | `maxSlots` | yes | The cap: never more than this many slots at once, whatever the classes add up to. Never below the number of classes: a create with less is refused ("A place for every class" below). |
+| `aptPackages` | yes | The Ubuntu packages added to the runner image, which the machine builds once ("The runner image's packages" below). The default is `["libatomic1", "build-essential"]`. Given at create, it replaces the whole list, so name the defaults too when you add one; `[]` runs the runner image as it is. |
 | `allowDefaultRunnerGroup` | no | `true` lets the pool start on the organisation's default runner group. Leave it out. |
 | `reserveMemory` | no | Memory kept back for the virtual machine itself. The slots share what is left. |
 | `dockerCache`, `dependencyCache` | no | The disk the Docker layer caches and the dependency caches may use, over all slots. |
@@ -5099,8 +5100,23 @@ neither has been measured on the pool itself.
 ### What to know
 
 - **One job per runner.** A runner is registered for one job (GitHub calls it just-in-time and ephemeral), runs in a
-  container made from the runner's public image, and is removed with everything in it. The next job gets a new
+  container made from the pool's runner image (the runner's public image with `aptPackages` added), and is removed
+  with everything in it. The next job gets a new
   registration and a new container, so no job finds another's files, processes or installed packages.
+- **The runner image's packages.** The runner's public image is Ubuntu 24.04 with git, curl, jq, unzip, python3,
+  Docker's client and a passwordless `sudo`, and less than GitHub's own `ubuntu-latest`: no C compiler, no `make`, no
+  `libatomic1` (pnpm and other Node.js-based tools stop with `libatomic.so.1` missing). So before it begins any slot
+  the controller builds one image on the machine: `FROM` the pinned runner image, then `apt-get install
+  --no-install-recommends` of `aptPackages` (by default `libatomic1` and `build-essential`, which is `make`, `gcc`
+  and `g++`). It is named `arca-runner-pool-<the pool's id>:<a digest of what it is built from>`, kept on the
+  machine's disk, and every runner starts from it; a controller that finds it built builds nothing. Node.js is not in
+  the list: a workflow sets up the version it wants with `actions/setup-node`, and the runner carries its own for
+  JavaScript actions. A build that fails (a mirror that cannot be reached, a name that is not a package) is said in
+  `service_logs`, with the image, the step and the package manager's last lines; no runner starts until a build
+  succeeds, and it is tried again every minute. Docker's whole output is in
+  `/var/log/arca-runner-pool/runner-image-build.log` inside the machine. The packages come from Ubuntu's archive on
+  the day of the build, so two machines built on different days can differ in their versions; the runner image
+  underneath is the pinned one.
 - **Admission by memory.** A slot starts only while there is memory for its whole size: memory that no other slot has
   reserved, and memory the machine has free at that moment. A slot's memory is a hard limit with no swap, so a job that
   passes it is stopped by the kernel and no other slot pays for it. CPU is different: each slot has a ceiling of its
@@ -5124,8 +5140,11 @@ neither has been measured on the pool itself.
   the new value into the virtual machine, and the controller uses it for the next token. To retire a credential a job
   may have taken, delete the App's key (or the token) on GitHub: that, not Arca, makes it worthless.
 - **Stopping and restarting.** `instance_stop` and `instance_restart` need your approval. Runners that are idle are
-  taken off GitHub first; a job that is running is lost and GitHub reports it as failed. After the machine Arca runs
-  on restarts, the pool starts by itself.
+  taken off GitHub first; a job that is running is lost and GitHub reports it as failed, because the machine's
+  Docker stops with it. After the machine Arca runs on restarts, the pool starts by itself. The controller alone
+  restarting inside a running machine (its service is restarted after a crash, for example) cuts no job short: a
+  runner at its job is left to finish it, the controller that starts next watches it to its end and records it, and
+  only then is its slot given a new runner, from the runner image of that controller.
 - **Pins, and what you are trusting.** The runner is `ghcr.io/actions/actions-runner` 2.338.2 and the slot's daemon is
   `docker` 29.9.3-dind, both by digest: the bytes are fixed. The virtual machine is `images:debian/13/cloud`, the
   public Debian 13 image with cloud-init (which runs the first boot and grows the disk), named by its alias and not by
