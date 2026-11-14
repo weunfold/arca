@@ -186,7 +186,7 @@ refused without the value being echoed back.
 | `canvasOrigin` | no | The loopback DSH origin the remote canvas proxies: an `http://` literal loopback IP and port, with no path. Default `http://127.0.0.1:3081`; any other origin refuses the config before `serve` listens. |
 | `approval.trustOwnerKeysFrom` | no | Absolute paths of other kernels' owner passkeys files on this machine, which this kernel also trusts, read-only, for action approvals only (never to change its own passkeys). See "Approving on another kernel of this machine". |
 | `approval.origins` | with `trustOwnerKeysFrom` | The page origins (`approvalOrigin` form) a passkey from those files may answer from. A line for any other origin is not trusted. |
-| `approval.linkedHosts` | no | `[{ "name": "<host>", "socket": "<path>", "tokenFile": "<path>" }]`: the kernels on this machine whose proposals this kernel's approval page lists and relays approvals to. |
+| `approval.linkedHosts` | no | `[{ "name": "<host>", "socket": "<path>", "tokenFile": "<path>", "incusSocket": "<path>" }]`: the kernels on this machine whose proposals this kernel's approval page lists and relays approvals to. The optional `incusSocket` is that host's Incus socket on this machine (local, or forwarded to a path here); `instance_move_preflight` reads the host through it, with GETs only. |
 
 The config is refused, with exit 2, when:
 
@@ -864,9 +864,17 @@ upgrade, as any shipped template nobody edited. A service made before keeps runn
 is its own instance, and the upgrade does not touch it. Its `service_status` shows the newer release under `update`
 (`"state": "differs"`, the new digest as `templatePin`). A new service pulls 3.136.4.
 
-Keep a running service on the release it has: Arca has no way yet to move one to its template's version in place.
-The only way today is a `service_remove` and a `service_create`, and the remove deletes the service's data, which
-Arca cannot put back into the new service:
+Keep a running service on the release it has, unless you move it yourself: Arca does not move one to its template's
+version by itself. A container moves in place with `service_update {name, digest}`: to the digest an OCI template now
+names, or, for a service made from a local image pinned by fingerprint, to that image's fingerprint, which must
+already be in the service project's image store. An update in place needs an image pinned by digest or fingerprint, a
+template port for the health check, and the service's data on a declared volume (a template `data` path): the rebuild
+replaces the root, so whatever the service keeps there is gone, and a service whose template declares a volume it does
+not have is refused. A service that keeps data on its root, whose image is not pinned, or whose template declares no
+port, is not updatable in place: copy the data out, or create a new service. Keep the old image in the store until the
+update has succeeded, since a rollback in a project without snapshots rebuilds the old root from it. A virtual machine
+has no update path: the way is a `service_remove` and a `service_create`, and the remove deletes the service's data,
+which Arca cannot put back into the new service:
 
 - The server's `/data` is its own volume, `<name>-data`, which `service_remove` deletes with the instance. A snapshot
   of the instance leaves that volume out; it needs its own: `snapshot_create` with `{project: "arcak-svc", volume:
@@ -964,6 +972,26 @@ work: the key first, at the digest the service runs, then the digest; or the dig
 apply the key. For an image whose setuid helpers break under the key, moving the digest first is the safer order, since
 the service then runs the new image before it takes the key. With no difference, an update to the digest the service
 already runs is the no-op it always was.
+
+A container template may also declare `rawLxc`, a list of extra LXC lines its instance's `raw.lxc` carries beside
+`lxc.no_new_privs=1`, for example `"rawLxc": ["lxc.sched.core=0"]`. Each is `lxc.<key>=<value>` on one line (the key of
+lower-case letters, digits, dots and underscores, at most 256 bytes, at most 16 lines); anything else is refused when
+the template is read. The create writes `raw.lxc` as `lxc.no_new_privs=1` when the template sets `noNewPrivileges`, then
+each declared line in order, and marks the value it wrote in `user.arca.rawlxc`. Every reconcile keeps exactly that
+value: a declared line survives it, and a line nobody declared is replaced, as `raw.lxc` was replaced before. When the
+record declares no line and does not set `noNewPrivileges`, the reconcile removes `raw.lxc` only when it is exactly
+`lxc.no_new_privs=1` or exactly what the mark says Arca wrote, and removes the mark; any other `raw.lxc` is left as it
+is, as before. A service whose template declares no `rawLxc` carries no mark and is created and reconciled as it always
+was. `rawLxc` needs the same step on the node as `noNewPrivileges` (`restricted.containers.lowlevel=allow`), a tenant's
+service and a virtual-machine template are refused it the same way, and the record keeps the lines as `rawLxc`. The
+create's card has a `Low-level container settings (raw.lxc)` row with the container's `raw.lxc` lines whole (the
+proposal fills `rawLxc` in from the template; a call that states it must state exactly the template's), and so does a
+reconfigure's card when they change. Incus applies `raw.lxc` last, so a line can replace what Incus set for the
+container (its root, its AppArmor profile, its namespaces and network, a mount, a hook, a limit). On both cards, every
+line therefore gets an `Isolation` row of its own, in plain words and naming the line, `This line may loosen the
+container's isolation: <line>`, except the few lines Arca knows are harmless: any `lxc.sched.core` line and
+`lxc.no_new_privs=1`. Nothing is refused for it: the owner decides on the card. An existing service takes new lines with `service_reconfigure` (see "Reconfiguring a service from its
+template").
 
 If the owner later sets `restricted.containers.lowlevel` back to `block`, Incus refuses every later write of the
 instance config of a service that has the key, since the whole config is checked: a secret, a link or an environment
@@ -1576,17 +1604,19 @@ record is refused.
 ### Updating a service to a new image digest
 
 `service_update` takes `{name, digest, timeoutSeconds?, eraseData?, tenant?}` (or `{name, follow}`, see below) and
-moves a running container service made from an image by digest (today `automagik-server`) to another digest of the
-same image in one call. It is a destructive verb (it takes the optional `confirm`), needs a `doctor` token and asks
-the owner for nothing, except for `eraseData` (see below); it works inside a tenant as outside one. There is no
-update path for `automagik-workspace` yet: it is a virtual machine, whose Docker pulls its own server image, and the
-verb refuses it. In order, each step a line in `service-updates.jsonl` in the
+moves a running container service made from an image by digest (today `automagik-server`) or from a local image
+pinned by fingerprint (a template's `local:<alias>` beside a `digest`, see "A local image may be pinned") to another
+digest, or fingerprint, in one call. It is a destructive verb (it takes the optional `confirm`), needs a `doctor`
+token and asks the owner for nothing, except for `eraseData` (see below); it works inside a tenant as outside one.
+There is no update path for `automagik-workspace` yet: it is a virtual machine, whose Docker pulls its own server
+image, and the verb refuses it. In order, each step a line in `service-updates.jsonl` in the
 state directory (an append-only file of JSON lines: a `begin`, one line per step, an `end`; never a secret):
 
 1. the instance is stopped, if it runs, and a snapshot of it, `pre-update-<time>`, is taken where the project allows
    one. No project Arca makes does (each is restricted, and Incus answers that it does not allow snapshot creation),
    so on a node as Arca makes it there is no snapshot, and the answer's `snapshot` is `null`;
-2. its root is rebuilt from `<repository>@<digest>`; Incus may take up to 10 minutes to fetch the image. Incus keeps
+2. its root is rebuilt from `<repository>@<digest>`, or, for a local pinned image, from the project's own copy of the
+   image whose fingerprint is `digest`; Incus may take up to 10 minutes to fetch an OCI image. Incus keeps
    what is not the root: the config, the secrets, the firewall rules and the data volume (a template's `data`
    path, `/data` for `automagik-server`). Whatever the old version wrote to its own root is gone, so **an update of a
    service that keeps its data on its root disk is refused** (see "A service that keeps its data inside the
@@ -1608,10 +1638,25 @@ the old version is started as it is, and the refusal says so. If Incus does not 
 rolled back, so as not to rebuild twice at once: the refusal is `update_unsettled`, and the same update may be asked
 for again once Incus is idle. If the old version cannot be put back, the refusal is `rollback_failed`, says so, and
 leaves the service stopped. A failure before anything is changed (the digest is malformed, the service is not made
-from an image by digest, its instance is not the one Arca created, it has never been started, the snapshot failed for
+from an image by digest or a local image pinned by fingerprint, the image a local update names is not in the service
+project's image store, its instance is not the one Arca created, it has never been started, the snapshot failed for
 a reason other than the project not allowing one) says "Nothing was changed". A call for the digest the service
 already runs changes nothing and answers `updated: false`. A service being updated refuses a second update until
 the first ends. The call is synchronous and can take several minutes: the journal keeps what it did.
+
+A local image is moved by fingerprint: the call's `digest` is the new image's fingerprint (`sha256:` and 64 lower-case
+hex digits, as Incus writes it), and the image must be in the service project's own image store before anything is
+changed. The node reads that store first and refuses, before it stops the service and with "Nothing was changed", when
+no image there has that fingerprint, saying how to put it there (`incus image copy <image> local: --alias <alias>
+--project arcak-svc`, or a build in that project). `action_propose` does not read the image store: a card made before
+the image is put there can be approved, and its run is then refused before anything is changed. The record's alias
+becomes the installed template's alias when that template pins the same fingerprint, and stays what it was otherwise;
+the fingerprint decides which image Incus uses. **Keep the old image in the store until the update has succeeded**: a
+rollback in a project that allows no snapshot rebuilds the old root from the old fingerprint. If that image is gone, a
+rollback after a failed start or health check answers `rollback_failed`; after a failed new rebuild the old root was
+never taken away, so the answer is `rolled_back` with the old root kept. A project that allows snapshots restores the
+snapshot instead, and the record still names the old image either way. The update rebuilds from the project's own copy,
+never from an alias alone; a rebuild from an image the store no longer holds fails before it takes the old root away.
 
 #### A service that keeps its data inside the container
 
@@ -1644,6 +1689,50 @@ The data volume is the service's own and is never snapshotted or touched: a roll
 version wrote, a migration for example, which the old version may not read. A virtual machine, a function and an
 adopted service are refused. Where a snapshot was taken it stays, named in the answer, for you to delete or restore
 by hand.
+
+### Reconfiguring a service from its template
+
+`service_reconfigure` takes `{name, tenant?}` through `action_propose` and makes a container service what its CURRENT
+template says, behind one owner card, without a rebuild: the image and the data volume are not touched. Install the
+changed template first (`arca templates install`), then propose `{"action": "service_reconfigure", "args": {"name":
+"web"}}`; any viewer may propose it, as every action, and only the owner's approval runs it. It is a destructive verb
+and takes the optional `confirm`. The node renders the service again from the installed template and works out the
+difference from its record, which it writes into the proposal as `changes`:
+
+- `environment`: one row per key that changes, removed first, then changed, then added, each in key order. A value the
+  template gives with no secret in it is shown, with what it was when the record held it as plain text (`changed: two
+  (was: one)`). A value that holds a secret is shown by its key and the secrets' names (`holds the secret API_KEY
+  (value not shown)`); a value a link gives (what `service_connect` handed the service) is shown by the link, never by
+  value, and is rendered again from the provider's template now. A key the template no longer gives is removed; one
+  whose secret is not set yet is removed with the secret named, and comes back once the value is set.
+- `secrets`: a secret the template declares that the service does not hold is shown as `added: secret, value set
+  separately` (set it afterwards with `service_secret_set`, which renders the keys that use it), or, when the template
+  says `generate`, as made by Arca now. A secret the service holds that the template no longer declares is removed
+  from the record; its file stays. A secret's value never appears on the card, in the answer or in the journal.
+- `ports`, `rawLxc` and `noNewPrivileges`: `{from, to}` when the template says otherwise; `rawLxc` is the container's
+  `raw.lxc` lines whole, `lxc.no_new_privs=1` among them when it is set. A tenant's service keeps its low-level
+  container settings.
+
+The card shows the service, a row counting the changes (`environment values 43 added, 2 changed, 1 removed; 4
+secrets; its low-level container settings`), one row for each environment key and secret that changes, the ports and
+the low-level settings, and what happens: the service is restarted once if it runs. The approval binds `changes`. When
+the approved call runs, it works the difference out again and refuses, changing nothing, when it is not the one on the
+card ("the service or its template changed since the owner's card was made: propose it again"), so what is applied is
+exactly what the owner approved. A call without an approved card is refused the same way, naming `action_propose`.
+
+The run then, once each: makes the secrets the template generates, saves the record (the node writes the instance's
+environment, `raw.lxc`, `user.arca.ports` and the ACL from it), restarts the service if it runs, and reads the
+instance's config back. The answer carries `reconfigured`, the `changes` it applied, `restarted`, `running`, and
+`readBack: {matches, differs}`, where `differs` names the keys (or `raw.lxc`) whose value Incus holds is not what was
+applied, never a value. A write the node refuses, or a restart that fails, puts the old record back and starts the
+service again, and the answer says so. Each step is a line in `service-updates.jsonl` with key and secret names only.
+A card whose only difference is a secret whose value is set separately writes nothing and restarts nothing. A secret
+the run generates is shown as generated on the card and in the answer, and is applied on the first approval. The
+record is read again under the node's write gate right before it is written: when a link, a secret, a port or the
+low-level settings changed since the plan was made (a `service_connect` or `service_secret_set` meanwhile), nothing is
+written and the call says to propose it again. A virtual
+machine, a function and an adopted service are refused. `service_reconfigure` and `service_update` of one service never
+run at once.
 
 ### A service that follows Automagik's releases
 
@@ -1797,7 +1886,7 @@ unix socket. The verbs
 in this build are `arca_status`, `node_metrics`, `watch_report`, `alerts_list`, `token_list`, `journal_list`, `plan_list`,
 `action_propose`, `plan_decline`, `approval_submit`, `action_approve`, `peer_keys_sync`, the Postgres and ontology verbs, `service_create`, `service_list` and
 `service_status`, `gpu_attach` and `gpu_detach`, `storage_list`, `storage_add`, `snapshot_create`, `snapshot_list` and
-`snapshot_delete`, and `instance_start`, `instance_stop` and `instance_restart`.
+`snapshot_delete`, `instance_start`, `instance_stop` and `instance_restart`, and `instance_move_preflight`.
 
 The unix socket serves only a peer whose credentials carry the server's own uid. Any other peer is closed before a byte of
 its request is read.
@@ -2117,6 +2206,33 @@ the failure reason. The failure and provenance fields are additions: `cpu.coresK
 `load.reason` and `memory.reason`. Every field the earlier schema carried keeps its name and meaning, and a local node's
 figures do not change.
 
+## OS update state: `os_update`
+
+`os_update` is a viewer read of the node's Arca OS update state. The sampler reads incus-osd's update document,
+`GET /os/1.0/system/update`, with the Secure Boot and TPM reading every 5 minutes, and the verb answers from that reading:
+it sends no request of its own. When the document's health names no current version, the same read also asks `GET /os/1.0`
+for `environment.os_version`. `node_metrics` stays the host metrics domain; the update state changes on a slower cadence
+and has its own contract.
+
+| Field | From |
+|---|---|
+| `known` | `false` when the update document could not be read: a plain Incus that answers 404, a failed read, or before the first read. Never an error. |
+| `asOf` | When the read ran, epoch milliseconds. |
+| `version` | `state.health.current_version`, else `environment.os_version` of `/os/1.0`. |
+| `channel`, `checkFrequency` | `config.channel` and `config.check_frequency`, verbatim (`6h`, `never`). |
+| `automatic` | `!config.auto_updates_off` (incus-osd omits the field when it is false). |
+| `lastCheckAt` | `state.last_check`, when it is a usable RFC 3339 time. |
+| `lastSuccessAt` | The check time of the newest check this kernel saw complete (the same memory the update alert uses). |
+| `lastUpdatedVersion`, `lastUpdatedAt` | The version a completed `… has been updated to version V` status named, kept only when it is a plain version token, and the check time read with it. |
+| `needsReboot`, `pendingVersion`, `previousVersion`, `goodVersion`, `lastResult`, `lastReason` | `state.needs_reboot` and `state.health.*`, verbatim. |
+| `lastErrorKind` | `state.last_error_kind` as the OS classified it: `network`, `parse`, `signature`, `trust` or `other`; `null` when absent or empty. The kernel never classifies an error. |
+| `trust` | `embeddedCaFingerprint`, `presentedCaFingerprint` (SHA-256, hex pairs joined by colons), `failures` and `escalated` from `state.embedded_ca_fingerprint`, `state.presented_ca_fingerprint`, `state.trust_failures` and `state.trust_escalated`; `null` when the OS reports none of them. |
+
+Every field is present, and `null` when unknown. The raw `state.last_error` text is never read, and the status text is not
+kept beyond the version token. `lastResult` and `lastReason` are the OS's own words, so the verb is marked `untrusted`.
+The canvas's Fleet view reads this verb on every configured host. The update server's newest version for a channel is not
+in the update document, so the view compares a node with the newest version reported on the fleet's own nodes.
+
 ## Starting, stopping and restarting instances
 
 `instance_start`, `instance_stop` and `instance_restart` take `{project, instance}` and change the power state of one
@@ -2170,6 +2286,72 @@ with `"secrets":null`: it names the secrets and never holds a value or a reason 
 The `begin` line is durable before anything is sent to Incus:
 when it cannot be written (the file is a link, or is not mode 0600) the call is refused with `InstanceJournalUnavailable`
 and nothing changes. A file past 8 MiB is set aside as `instance-actions.jsonl.1`, replacing the one set aside before.
+
+## Before moving an instance: `instance_move_preflight`
+
+`instance_move_preflight` (viewer) answers, before anything is moved, whether a target node can take each instance and
+what to fix first. It changes nothing: it sends only GETs, to this node's Incus and to the target's, and walks the
+instance's storage folder on this host to measure it. Nothing is stopped, started, copied or created, no proposal is
+recorded, and no journal or state file is written. Every finding is a check in the instance's row; the verb itself
+refuses only arguments it cannot read.
+
+It takes `instances`, a list of 1 to 50 `{project, name}` references on this node (one instance is a list of one), the
+`target`, and an optional `live` (default `false`). The target is one of this kernel's linked hosts
+(`approval.linkedHosts`), named as the config names it, whose `incusSocket` is that host's Incus socket here. A target
+with no such linked host, with no `incusSocket`, or whose Incus does not answer is not a refusal: `target.reachable` is
+`false`, `target.reason` says why, and every row is no-go with that reason.
+
+The answer has one row per instance, in the order asked: its `project`, `name` and `target`, `go`, a `reason` when it is
+no-go, and eight `checks`, always all eight and always in this order. Each check is `ok` or not, with a `detail` an
+operator can act on, `findings` (each with its `subject`, `ok`, `detail` and a `proposal`), and `risks` that do not
+block the move by themselves. `go` is true only when every check is ok.
+
+| Check | What it reads | Not ok when |
+|-------|---------------|-------------|
+| `size` | Everything that lands on the target pool, measured on this host by walking it: the instance's own folder (`<incus dir>/storage-pools/<pool>/containers/<project>_<name>`, or `virtual-machines/`), its snapshots (each counted in full, so the need is an upper bound), each custom volume it mounts that is not on the target yet and lands on the same pool (Incus keeps it at `custom/<project>_<name>`, `default_<name>` when the instance's project does not set `features.storage.volumes`), and each host folder it mounts. A file counts at its size or its blocks, whichever is larger, and a file with several links once. On btrfs and dir the folders are always there; on zfs, lvm and ceph a container's volume is walked only while Incus has it mounted, and a virtual machine's disk there is a block volume that is not walked. Incus's own usage figure is never used: it leaves out data shared with a snapshot or an image clone. It adds 10% headroom and compares that with the target pool's free space less every earlier instance of the same call that fits there. `measure` holds every number, part by part. | The need is larger than what is left, or the free space cannot be read. The row also gives the need without the snapshots (`neededWithoutSnapshotsBytes`, `fitsWithoutSnapshots`) and says "fits without snapshots" when only that one fits. When anything cannot be walked (an unmounted or block volume, an unknown driver, a folder the kernel's user cannot read) the size is not measured: not ok, with `measure.notMeasured` and the detail giving the reason. |
+| `storageDriver` | The driver of the instance's pool here and of the target pool (the pool of the same name, else the one the target's default profile names). | The target has no such pool. A move across drivers is ok, with `crossesDriver: true` and the risk said: Incus copies the files one by one instead of sending a btrfs or zfs stream. |
+| `cpu` | Both hosts' CPU features (`/1.0/resources`), their x86-64 levels, and whether the target runs the instance's architecture. | The target does not run the architecture; or, with `live: true`, it lacks any CPU feature of this host (`missingFeatures` names them). On a cold move a missing feature is a risk: programs built for this host's CPU may use it. |
+| `devices` | Each GPU, GPU node (`/dev/dri/...`), other `unix-char` or `unix-block` device, USB and PCI device, custom volume and host folder disk. | The target lacks it. A host device Incus does not list cannot be confirmed and is not ok unless the device says `required=false`. A host folder disk is always not ok: its data stays here, and the proposal names a custom volume on the target to copy it into. |
+| `networks` | Each network card's network or parent, and its fixed address. | The target has no such network (the proposal names the same subnet as here), the fixed address is outside the target network's subnet, or another card holds it there. |
+| `projectsProfilesAcls` | The project and its `features.*`, each profile, and each ACL the cards or their networks name. | One is missing on the target or differs from here; each is named. |
+| `proxyListen` | Each proxy device's listen address. | It listens on an address of this host that the target does not hold; the proposal names the target's own addresses. Every-address and loopback listens move as they are. |
+| `macvlanParents` | Each macvlan card's parent interface, matched against the target's own interface names. | The target has no interface of that name. On IncusOS the bridge carries the network card's name and a `_p...` port is not a parent, so the proposal lists the target's own names. |
+
+To measure, the kernel's user needs read access to the Incus storage folders (`/var/lib/incus/storage-pools` and
+below) and to every host folder an instance mounts. On a standard host those are `root:root` with mode 0711, so a kernel
+that runs as an ordinary user cannot list them: its `size` check says "not measured" with the permission error and the
+path, and every other check still answers. Give the kernel's user read access there (for example through an ACL), or
+read the size from a kernel that can.
+
+A worked example. `node-a` holds the container `web` in the project `shop`, 4.0 GiB on a btrfs pool, with a fixed address
+on `arcabr0` and a proxy on `node-a`'s own address. Its config links `node-b`:
+
+```json
+"approval": { "linkedHosts": [ { "name": "node-b", "socket": "/run/arca-node-b/arca.sock",
+  "tokenFile": "/etc/arca/node-b-relay.secret", "incusSocket": "/run/arca-node-b/incus.sock" } ] }
+```
+
+```
+arca call instance_move_preflight '{"instances":[{"project":"shop","name":"web"}],"target":"node-b"}'
+```
+
+```json
+{ "target": { "name": "node-b", "reachable": true, "reason": null }, "live": false,
+  "rows": [ { "project": "shop", "name": "web", "target": "node-b", "go": false, "reason": "not ok: proxyListen",
+    "checks": [
+      { "check": "size", "ok": true, "detail": "measured 4.0 GiB (4294967296 bytes) by walking the instance 4.0 GiB at /var/lib/incus/storage-pools/default/containers/shop_web; with 10% headroom it needs 4.4 GiB. node-b's pool default has 120.0 GiB free, minus 0 B pending for earlier moves to it = 120.0 GiB available: it fits", "findings": [], "risks": [],
+        "measure": { "method": "walked", "measuredBytes": 4294967296, "headroomBytes": 429496729, "neededBytes": 4724464025, "targetFreeBytes": 128849018880, "pendingBytes": 0, "availableBytes": 128849018880, "...": "..." } },
+      { "check": "proxyListen", "ok": false, "detail": "not ok: https", "risks": [],
+        "findings": [ { "subject": "https", "ok": false,
+          "detail": "the proxy https listens on 203.0.113.10 port 443, an address of this host (enp6s0) that node-b does not have; on node-b it would not listen",
+          "proposal": "re-point https's listen to one of node-b's own addresses: 203.0.113.20 (br-lan), or to 0.0.0.0 for every address" } ] },
+      "... the other six checks, each ok ..."
+    ] } ] }
+```
+
+The operator re-points the proxy, then asks again; `go` turns true. Several instances in one call are sized one after
+another against the same pool: an earlier one that fits counts as pending for the later ones, and its name is in their
+`detail` and in `measure.pendingFor`.
 
 ## Snapshot storage and snapshots
 
@@ -2521,9 +2703,10 @@ keys are sorted, it has no spaces, and it ends without a newline:
 {"action":"delete","expiresAt":"<ten minutes after issue>","host":"<host>","issuedAt":"<now>","nonce":"<32 hex digits>","paramsDigest":"<digest of {\"plan\":<plan>}>","target":"plan-<plan>"}
 ```
 
-An action proposal is an inert request from a viewer (normally the canvas Doctor) to run one of twenty-four gated
+An action proposal is an inert request from a viewer (normally the canvas Doctor) to run one of twenty-five gated
 service, database, GPU, storage, snapshot, instance, function or tenant verbs: `service_create`, `service_remove`,
 `service_update` (see [Updating a service to a new image digest](#updating-a-service-to-a-new-image-digest)),
+`service_reconfigure` (see [Reconfiguring a service from its template](#reconfiguring-a-service-from-its-template)),
 `service_import`, `service_release`
 (see [Importing a service another manager created](#importing-a-service-another-manager-created)), `service_publish`,
 `service_unpublish`,
@@ -2533,7 +2716,7 @@ service, database, GPU, storage, snapshot, instance, function or tenant verbs: `
 `instance_restart` (see [Starting, stopping and restarting instances](#starting-stopping-and-restarting-instances)).
 `function_create` and `function_remove` (see [Functions](#functions)), and `tenant_create`, `tenant_remove` and
 `deploy_remove` (see [Tenants](#tenants)), are proposed the same way. The canvas Doctor proposes twenty-two of them
-(not `service_update` and not `host_network_restore`); it reads `tenant_list`, `tenant_status`, `tenant_usage` (which names the deploy each instance
+(not `service_update`, `service_reconfigure` or `host_network_restore`); it reads `tenant_list`, `tenant_status`, `tenant_usage` (which names the deploy each instance
 came from), `function_list` and `function_runs` to know what to propose, and a removal of a tenant, a deploy or a
 function is drawn in the alert colour on its card. `action_propose` takes `{action, args}`; `args` is checked against
 that verb's own parameter schema, with
@@ -2544,7 +2727,7 @@ before its first call. The union sits inside `args`, never at the top of the inp
 one. `x-arca-by: "action"` tells the door to hold `args` to the branch `action` names, so a refusal is in that branch's
 own words (`/args: missing required field name`), not "matches none". A field the kernel fills in when the proposal is
 made (a GPU verb's `project`, `kind` and `uuid`; `storage_add`'s disk facts; the snapshot verbs' `name`, `kind`, pools
-and folder facts) takes any value in its branch and says so: the kernel removes or replaces what was sent, as it did
+and folder facts; `service_reconfigure`'s `changes`) takes any value in its branch and says so: the kernel removes or replaces what was sent, as it did
 before the branches. An unknown action is an invalid call and leaves no
 record. A proposal cannot choose a container image: `postgres_create` uses the image the node's `postgres-autopg`
 template names, or `kernel.postgresImage` on a node whose config sets it, and an explicit image that differs is
@@ -4448,9 +4631,10 @@ install --replace` from a newer release. `service_status` answers both under `up
 key on any other row. Both are read from this node's own records and files: no registry is asked and nothing is
 written. Two digests carry no order, so `differs` never says which version is the newer one. A service made from a
 system image by an alias has no version of this kind and carries no `update` (`baseImage`, above, is what it has),
-and neither does an adopted instance. For a container made from an image by digest, `service_update` moves it to another digest (see "Updating a service
-to a new image digest"); for a virtual machine the only way is `service_remove` and `service_create`. This only tells you that
-there is one.
+and neither does an adopted instance. For a container made from an image by digest or a local image pinned by
+fingerprint, `service_update` moves it to another digest, or fingerprint (see "Updating a service to a new image
+digest"); for a virtual machine the only way is `service_remove` and `service_create`. This only tells you that there
+is one.
 
 A virtual-machine template says where its version is with one key:
 
@@ -5155,6 +5339,157 @@ neither has been measured on the pool itself.
   Use the service network for a pool unless you have a reason not to. A GitHub Enterprise host or a package mirror on
   a private address cannot be reached from the service network.
 
+## Connecting GitHub from the approval page
+
+The steps above have you make the credential by hand. The approval page makes it for you instead (what still has to be
+wired to a pool is under "Not done yet" below): open
+`/approve/github` on the same address as the approval page and sign in with your passkey. The page offers three ways to
+connect an organisation. Each one ends in a *connection* (a "binding" in the verbs) that holds the organisation, the
+runner group, and the label sets you chose. You choose the label names; Arca does not add a prefix.
+
+Every credential GitHub hands over goes into the kernel's GitHub store, `<stateDir>/github/` (folder 0700, files 0600),
+and stays in the kernel process: the App's key, the sign-in grant, GitHub's tokens and the OAuth App's secret are never
+copied to a host, a runner or an assistant. One thing does leave: `github_runner_mint` answers one runner's
+just-in-time configuration, which is that runner's credential for one job, to **any caller with an `operator`
+token**, an assistant included. Whoever holds such a token can therefore make a runner in the connection's runner
+group and receive the jobs, and the secrets, of the repositories that group admits. Give operator tokens only to what
+you trust with those jobs (see "Not done yet" below).
+
+### What GitHub's permissions force
+
+GitHub has no permission for "one runner group". Whatever registers a runner can do everything GitHub puts under that
+permission:
+
+- **Organisation "Self-hosted runners": read and write** (the App mode). It covers registering runners with any
+  labels in any runner group, creating, changing and deleting runner groups, and removing runners. Whoever holds it can
+  make a runner that receives other repositories' jobs, and the secrets those jobs are given. It cannot read code.
+  Only an organisation **owner** can install an App that asks for it; when anyone else clicks, GitHub turns the click
+  into a request to the owners.
+- **Repository "Administration": read and write** is what a runner for one repository needs. It also covers the
+  repository's settings, collaborators, branch protection, deploy keys and deleting the repository. Arca does not ask
+  for it.
+- **OAuth scope `admin:org`** (the device-code mode) is the whole organisation administration of the person who
+  approves it. Arca uses it once and deletes it (below), but for those seconds it is that much.
+
+The push mode asks GitHub for nothing: you make the runner configurations yourself and send them to Arca.
+
+### Mode 1: connect with a code (device flow)
+
+The quickest. It needs a GitHub OAuth App that you, the operator, registered once (GitHub: your organisation's
+"Settings", "Developer settings", "OAuth Apps", "New OAuth App"; any homepage and callback address; tick "Enable Device
+Flow"). Give its client ID and a client secret to Arca once with `github_oauth_app_set` (`doctor` scope). The secret is
+kept in the store and never shown again.
+
+On the page, fill in the organisation, a runner group name (left empty, the organisation's default group is used, with a
+warning), the labels, and how many runners (1 to 50). Arca shows an eight-character code and the GitHub address
+(`github.com/login/device`). The person opens it, types the code, and approves. If the organisation restricts OAuth
+Apps, GitHub's screen shows a "Grant" (or "Request") button next to the organisation: an owner must press it on that
+same screen, or Arca's next step is refused and the page says so.
+
+Arca then uses the grant once, step by step, each step shown on the page and written to the audit log:
+
+1. asks GitHub for a runner registration token for the organisation;
+2. reads the runner groups, and creates the named group if it is missing (open to the organisation's private
+   repositories; change that on GitHub);
+3. registers each runner in that group with its own key pair, generated in the kernel. The private key never leaves
+   the store;
+4. deletes the grant (`DELETE /applications/{client_id}/grant`), whether the steps before it worked or not. Only
+   GitHub's 204 counts as deleted. Any other answer, a 404 included (GitHub's answer when it does not take the OAuth
+   App's client ID and secret, for example after the secret was rotated on GitHub and not in Arca), is shown as "NOT
+   deleted" with GitHub's status, and the person is sent to `https://github.com/settings/applications` to revoke Arca
+   by hand. The flow still ends Done when the runners were registered, and says the grant is still in place.
+
+What it leaves behind are **persistent** runners, each with its own credential. Know this: a persistent runner's
+credential works until the runner is removed on GitHub. A job that can read it can take it away and keep asking for
+jobs as that runner. Use this mode for repositories whose workflows you trust, and remove the runners on GitHub when
+you stop.
+
+### Mode 2: a GitHub App made for you (manifest flow)
+
+The page posts an App manifest to GitHub. The person sees GitHub's own "Create GitHub App" screen with everything
+filled in, presses Create, then picks the repositories on the install screen. The App asks for organisation
+"Self-hosted runners: read and write" and nothing else, has no webhook, and is private to the organisation. GitHub
+hands its private key to Arca's callback, which writes it to the store.
+
+After the install, Arca makes a runner group called `Arca runners` open to exactly the repositories picked (or adopts
+the group of that name if one exists). When GitHub's plan has no runner groups, it falls back to the default group and
+says so. Every runner is then minted just in time, one per job: `github_runner_mint` (or the signer's in-process call,
+`Signer::mint`) returns one ephemeral runner configuration and writes who asked, when, the labels, the runner group and,
+once known, the job. A runner for a scale set is minted only when GitHub says the scale set is in the connection's own
+runner group; another group's scale set is refused (`ScaleSetOutsideGroup`) and the refusal logs the group it is in.
+
+### Mode 3: you push the configurations (push mode)
+
+For those who will not give Arca any GitHub permission. The page makes a connection and shows an intake token once.
+Your own automation makes just-in-time runner configurations with GitHub's API
+(`POST /orgs/{org}/actions/runners/generate-jitconfig`) with your own credential, and sends each to Arca:
+
+```
+curl -X POST https://arca.example.com/github/intake/<connection> \
+  -H "Authorization: Bearer <intake token>" -H "Content-Type: application/json" \
+  -d '{"encodedJitConfig": "<from GitHub>", "labels": ["linux", "x64"]}'
+```
+
+Arca keeps each configuration for 24 hours (at most 1000 waiting) and gives each to one job. When none is waiting, a
+mint answers `Empty` and the pool waits.
+
+### Not done yet
+
+- **Device-code runners stay offline.** Their files (`.runner`, `.credentials`, `.credentials_rsaparams`) are in the
+  store and `Signer::runner_files` reads them, but no host and no pool template reads them yet. The runners are
+  registered on GitHub and stay offline until that is wired.
+- **The pool is not wired yet.** The runner pool's template does not call `Signer::mint` yet; until it does, App and
+  push connections mint only through `github_runner_mint`.
+- **Who may mint.** Any `operator` token may call `github_runner_mint` and receive a runner's credential (above). To
+  harden: the verb only for a token whose tool list names it, or the in-process call only.
+- **A restart while registering.** A kernel restart while a device-code connection is registering loses the flow
+  before the grant is deleted. Revoke Arca at `https://github.com/settings/applications` if a connection never reached
+  Done.
+- **Disconnect asks no confirmation on the page**, and `github_mint_job` takes any mint id.
+
+### Workflows
+
+So that a workflow keeps working when the pool is off, let a repository variable pick the runner:
+
+```yaml
+runs-on: ${{ vars.ARCA_RUNNER || 'ubuntu-latest' }}
+```
+
+Set `ARCA_RUNNER` on the repository or organisation to the label you chose. Unset it and the jobs go back to GitHub's
+own runners.
+
+### Disconnecting
+
+The page's "Disconnect" (or `github_disconnect`) ends a connection, and the audit log records it:
+
+- **App**: Arca uninstalls the App from the organisation and deletes its private key from the store. The App itself
+  stays on GitHub until you delete it; the page links to its "Advanced" settings, where "Delete GitHub App" is.
+  Uninstalling or deleting the App on GitHub yourself works too: the next mint finds out and marks the connection
+  revoked. A suspended installation marks it suspended until you lift it.
+- **Push**: the intake token and the waiting configurations are deleted.
+- **Device code**: the runners' credentials are deleted from the store, so they go offline. Remove them on GitHub
+  ("Settings", "Actions", "Runners") to clear them from the list.
+
+### The audit log
+
+`<stateDir>/github/audit.jsonl`, one JSON line per event, read with `github_audit` (optionally for one connection).
+It records every flow start, grant, runner registration, grant deletion, mint (minted or refused, with the reason),
+job attachment and disconnect, with the caller and the time. It holds no credential. It is rotated at 8 MiB to
+`audit.jsonl.1`.
+
+### Verbs
+
+| Verb | Scope | What it does |
+|------|-------|--------------|
+| `github_oauth_app_set` | doctor | Stores the OAuth App's client ID and secret for the device-code mode |
+| `github_connect` | operator | Starts a device-code connection; answers the code and the address |
+| `github_connect_status` | viewer | The steps of one device-code connection so far |
+| `github_bindings` | viewer | The connections, without credentials |
+| `github_audit` | viewer | The audit log |
+| `github_runner_mint` | operator | One just-in-time runner configuration for a connection's labels |
+| `github_mint_job` | operator | Records which job a minted runner took |
+| `github_disconnect` | operator | Ends a connection (above); destructive, so `confirm: false` refuses it |
+
 ## A pool of GitLab runners
 
 The shipped `gitlab-runner-pool` template is one virtual machine that runs the CI jobs of one GitLab, self-hosted or
@@ -5494,7 +5829,7 @@ A kernel-mode node with the managed service network (`kernel.serviceCidr`) runs 
 
 | Verb | Who runs it | What it does |
 |------|-------------|--------------|
-| `function_create {name, image, digest, triggers, command?, env?, secrets?, links?, limits?}` | only an approved action proposal | Creates the function, stopped. Its timer runs it from then on. |
+| `function_create {name, image, digest, triggers, command?, env?, secrets?, links?, internet?, limits?}` | only an approved action proposal | Creates the function, stopped. Its timer runs it from then on. |
 | `function_remove {name}` | only an approved action proposal | Stops the run that is going, deletes the function with its secrets. Its lines in the run log are kept. |
 | `function_secret_set {name, key, value}` | a `doctor` token | Sets one of the secrets the definition names. Write-only. |
 | `function_list` | a `viewer` token | Every function, with its definition, which secrets are set, whether a run is going, and its newest run. |
@@ -5530,6 +5865,7 @@ action_propose { "action": "function_create", "args": {
 | `env` | Plain values by name, at most 32, each at most 160 characters. The card shows each whole. |
 | `secrets` | Names only, at most 16. See below. |
 | `links` | Services of this node the function may reach, each on one tcp port that service declares. At most 8. |
+| `internet` | Optional, `true` or `false` (the default). `true` lets its runs open connections to every public address, as a service can; see below. |
 | `triggers` | Exactly one, a timer: `everySeconds` from 10 to 86400. |
 | `limits` | `seconds` 1 to 900 (default 60), `memory` a size of at least 8MiB (default 128MiB), `cpu` 1 to 64 (default 1). |
 
@@ -5550,13 +5886,20 @@ and a default that rejects both ways:
 - a **private address** outside the node's services is opened exactly as a service's is: the node's config names it for
   the function's name (`kernel.serviceDestinations`), the proposal fills it in, and the card's `Private network` row
   shows it ([A service that may reach one private address](#a-service-that-may-reach-one-private-address));
-- **nothing else.** A service's rules end with one that lets everything else out to the internet. A function's do not:
-  it can open no connection to a public address. There is no setting for it in this build.
+- the **internet**, only when the definition says `"internet": true`. The rules then end with one allow of every
+  address outside the service network. The rejects before it are a service's: every private range, the node's own
+  addresses, and every service of this node but the linked ones stay closed. The card's `Internet` row says `Yes` and
+  that a run can send there whatever its program and its secrets hold. It is for a program whose work is a public API
+  (the CI analysis reads `api.github.com`): its host names change their addresses, so no rule can name them one by one;
+- **nothing else.** Without `internet`, a function's rules have no rule that lets everything else out: it can open no
+  connection to a public address.
 
-**One way out stays open, and the card says so.** The service network's own DNS answers a function, as it answers
-every instance there, and it asks the internet's name servers for a name it does not know. So a program can still
-send a little data out in the names it looks up, to whoever runs the name server of a domain. The `Internet` row of
-the card says this in the owner's words. Closing it is not in this build.
+**Without `internet`, one way out stays open, and the card says so.** The service network's own DNS answers a
+function, as it answers every instance there, and it asks the internet's name servers for a name it does not know. So
+a program can still send a little data out in the names it looks up, to whoever runs the name server of a domain. The
+`Internet` row of the card says this in the owner's words. Closing it is not in this build. With `internet: true`
+the row says instead that the function can reach any public address and send there whatever its program and secrets
+hold, which covers this too.
 
 ### Secrets by name
 
@@ -6110,6 +6453,21 @@ The approval's audit line names the passkey and how it signed
 A spend, by either kind of key, with or without a request, is recorded as one line in `approval-nonces.jsonl` (its
 time and nonce). The spend's line names no key and no signers file, so which key approved is read from the approval's
 audit line, and an SSH spend has none.
+
+### The GitHub signer
+
+`cargo test -p arca --test github_signer` runs the GitHub connections against a fake GitHub (`tests/github/fake.rs`):
+the OAuth device flow, the REST calls, the Actions service's registration calls, the App calls (checking every App JWT
+against the App's key) and the scale-set calls, on one loopback server that checks every credential it is given. It
+covers the device-code connection end to end (polling that asks again when GitHub is busy and obeys `slow_down`; the
+grant used once, then deleted on success and on every failure, and a deletion GitHub does not confirm said plainly; the
+runners registered with their own keys in the chosen, the default or a new group; both registration flows; an
+organisation that restricts OAuth Apps; a declined sign-in; a refused runner), the manifest flow (one permission, the
+state checked, the key stored 0600, Arca's runner group made or adopted, the default group when the plan has none), the
+mint for the organisation and for a scale set of the connection's own group with its tokens kept (another group's
+scale set refused), an App suspended, uninstalled or deleted on GitHub, disconnecting, the push intake (its token, its
+labels, its HTTP route refusing browsers) and the audit log. The tests also check that no credential is in any file
+outside the private store's credential folders.
 
 ## Continuous integration
 
