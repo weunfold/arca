@@ -747,7 +747,10 @@ impl ActionKind {
                     row("Project", project),
                     row("Port", &args["port"].to_string()),
                     row("Reach", reach.words()),
-                    row("Edge", gpu_product.unwrap_or("read when the route is added")),
+                    row(
+                        "Edge",
+                        gpu_product.unwrap_or("read when the route is added"),
+                    ),
                     row(
                         "Effect",
                         "The edge serves this address with a certificate of its own and passes each request to the instance on this port, and its firewall lets it reach that port. An address that already has a route is pointed here instead.",
@@ -756,7 +759,10 @@ impl ActionKind {
             }
             Self::RouteRemove => vec![
                 row("Address", &format!("https://{}", text("hostname"))),
-                row("Edge", gpu_product.unwrap_or("read when the route is removed")),
+                row(
+                    "Edge",
+                    gpu_product.unwrap_or("read when the route is removed"),
+                ),
                 row(
                     "Effect",
                     "The edge stops serving this address and no longer opens its instance's port for it. The instance itself is not touched.",

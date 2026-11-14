@@ -118,7 +118,10 @@ impl EdgeRecord {
 
     /// Takes the route of `hostname` out; the route it held, if any.
     pub fn remove(&mut self, hostname: &str) -> Option<Route> {
-        let at = self.routes.iter().position(|held| held.hostname == hostname)?;
+        let at = self
+            .routes
+            .iter()
+            .position(|held| held.hostname == hostname)?;
         Some(self.routes.remove(at))
     }
 
@@ -286,7 +289,12 @@ mod tests {
 
     #[test]
     fn a_hostname_is_lowercase_labels_and_nothing_that_could_write_a_line() {
-        for good in ["llm.example.com", "a.b", "x-1.example.com", "1a.example.org"] {
+        for good in [
+            "llm.example.com",
+            "a.b",
+            "x-1.example.com",
+            "1a.example.org",
+        ] {
             assert!(hostname_ok(good), "{good}");
         }
         for bad in [
@@ -342,7 +350,8 @@ mod tests {
     }
 
     #[test]
-    fn the_global_options_read_the_client_address_from_the_proxy_header_and_use_the_dns_challenge() {
+    fn the_global_options_read_the_client_address_from_the_proxy_header_and_use_the_dns_challenge()
+    {
         let text = caddyfile(&EdgeRecord::default());
         assert!(text.contains("acme_dns cloudflare {env.CLOUDFLARE_API_TOKEN}"));
         assert!(text.contains("proxy_protocol {"));
@@ -399,13 +408,16 @@ mod tests {
             "root": {"type":"disk"}}});
         assert_eq!(instance_address(&fixed), Some(Ipv4Addr::new(192, 0, 2, 63)));
         let dynamic = json!({"expanded_devices": {"eth0": {"type":"nic","network":"br"}},
-            "state": {"network": {
-                "lo": {"addresses":[{"family":"inet","address":"127.0.0.1","scope":"local"}]},
-                "docker0": {"addresses":[{"family":"inet","address":"198.51.100.1","scope":"global"}]},
-                "eth0": {"addresses":[{"family":"inet6","address":"fe80::1","scope":"link"},
-                    {"family":"inet","address":"192.0.2.10","scope":"global"}]}
-            }}});
-        assert_eq!(instance_address(&dynamic), Some(Ipv4Addr::new(192, 0, 2, 10)));
+        "state": {"network": {
+            "lo": {"addresses":[{"family":"inet","address":"127.0.0.1","scope":"local"}]},
+            "docker0": {"addresses":[{"family":"inet","address":"198.51.100.1","scope":"global"}]},
+            "eth0": {"addresses":[{"family":"inet6","address":"fe80::1","scope":"link"},
+                {"family":"inet","address":"192.0.2.10","scope":"global"}]}
+        }}});
+        assert_eq!(
+            instance_address(&dynamic),
+            Some(Ipv4Addr::new(192, 0, 2, 10))
+        );
         assert_eq!(instance_address(&json!({})), None);
     }
 }

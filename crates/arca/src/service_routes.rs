@@ -74,8 +74,15 @@ fn edge_address(cfg: &ServiceConfig) -> String {
 /// What a route's approval card says of the edge, as the node holds it when the proposal is made.
 pub(super) fn edge_fact(entries: &[Entry]) -> String {
     match edge_of(entries) {
-        Some((_, edge)) => format!("the service {}, reached at {}", edge.name, edge_address(&edge)),
-        None => "none yet: this node has no edge, so the route cannot be served until one is created".into(),
+        Some((_, edge)) => format!(
+            "the service {}, reached at {}",
+            edge.name,
+            edge_address(&edge)
+        ),
+        None => {
+            "none yet: this node has no edge, so the route cannot be served until one is created"
+                .into()
+        }
     }
 }
 
@@ -100,7 +107,9 @@ impl ServiceHandler {
             (answer, None)
         } else {
             let removed = record.remove(&hostname).ok_or_else(|| {
-                service_not_found(format!("route {hostname}: this node has no route of that name"))
+                service_not_found(format!(
+                    "route {hostname}: this node has no route of that name"
+                ))
             })?;
             (removed.view(), Some(removed))
         };
@@ -156,14 +165,18 @@ impl ServiceHandler {
             Some(value) => value
                 .as_str()
                 .filter(|name| route::project_ok(name))
-                .ok_or_else(|| CallError::Invalid("project: expected an Incus project name".into()))?
+                .ok_or_else(|| {
+                    CallError::Invalid("project: expected an Incus project name".into())
+                })?
                 .to_string(),
         };
         let port = args["port"]
             .as_u64()
             .and_then(|port| u16::try_from(port).ok())
             .filter(|port| *port != 0)
-            .ok_or_else(|| CallError::Invalid("port: expected a tcp port from 1 to 65535".into()))?;
+            .ok_or_else(|| {
+                CallError::Invalid("port: expected a tcp port from 1 to 65535".into())
+            })?;
         let reach = match args.get("reach") {
             None => Reach::Private,
             Some(value) => value.as_str().and_then(Reach::parse).ok_or_else(|| {

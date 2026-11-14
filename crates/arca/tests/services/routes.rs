@@ -3,8 +3,8 @@
 //! example.com and every address synthetic.
 use super::*;
 use arca::route::{self, EdgeRecord, Reach, Route};
-use arca_incus::fake::ExecScript;
 use arca_incus::exec::{EDGE_CONFIG, ExecCommand};
+use arca_incus::fake::ExecScript;
 
 /// The address the served instance holds on its own bridge: private, outside the service /24.
 const TARGET: &str = "10.20.30.63";
@@ -227,7 +227,9 @@ fn a_route_needs_an_edge_a_real_instance_and_a_dns_name() {
             json!({"hostname":"app.example.com","instance":"app","project":"other","port":8080}),
         )
         .expect_err("no edge");
-    assert!(matches!(&no_edge, CallError::Refused { message, .. } if message.contains("arca-edge")));
+    assert!(
+        matches!(&no_edge, CallError::Refused { message, .. } if message.contains("arca-edge"))
+    );
     assert_eq!(
         rig.call("route_list", json!({})).expect("the list"),
         json!({"edge": null, "routes": []})

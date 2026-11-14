@@ -814,8 +814,12 @@ pub fn egress(cfg: &ServiceConfig, hosts: &Value) -> Vec<Value> {
                 .into_iter()
                 .filter(|target| {
                     !own.contains(&target.address)
-                        && arca_netproject::destination::refusal(target.address, target.port, gateway)
-                            .is_none()
+                        && arca_netproject::destination::refusal(
+                            target.address,
+                            target.port,
+                            gateway,
+                        )
+                        .is_none()
                 }),
         );
         open.sort();

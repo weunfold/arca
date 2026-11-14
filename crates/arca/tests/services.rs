@@ -4473,7 +4473,7 @@ fn templates_install_puts_every_shipped_template_and_its_script_in_place_in_one_
         service::entrypoint(&loaded, &dir).expect("its entrypoint script is installed with it");
         service::first_boot(&loaded, &dir).expect("its first-boot script is installed with it");
     }
-    assert_eq!(templates, 13);
+    assert_eq!(templates, 14);
     assert!(installed.contains(&"postgres-autopg.sh"));
     // One script serves nats and nats-primary; the replica has its own.
     assert!(installed.contains(&"nats.sh"));

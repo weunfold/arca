@@ -6498,10 +6498,7 @@ fn service_config(parts: ServiceParts<'_>) -> Result<crate::service::ServiceConf
         follow: None,
         follow_version: None,
         no_new_privileges: parts.template.no_new_privileges,
-        edge: parts
-            .template
-            .edge
-            .then(crate::route::EdgeRecord::default),
+        edge: parts.template.edge.then(crate::route::EdgeRecord::default),
     })
 }
 

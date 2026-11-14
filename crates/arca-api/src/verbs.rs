@@ -1176,12 +1176,16 @@ fn route_result() -> Value {
     );
     properties.insert("applied".into(), json!({ "type": "boolean" }));
     properties.insert("reloaded".into(), json!({ "type": "boolean" }));
-    properties.insert("removed".into(), json!({ "const": true, "type": "boolean" }));
+    properties.insert(
+        "removed".into(),
+        json!({ "const": true, "type": "boolean" }),
+    );
     properties.insert("note".into(), json!({ "type": "string" }));
-    schema["required"]
-        .as_array_mut()
-        .expect("a list")
-        .extend([json!("edge"), json!("applied"), json!("reloaded")]);
+    schema["required"].as_array_mut().expect("a list").extend([
+        json!("edge"),
+        json!("applied"),
+        json!("reloaded"),
+    ]);
     schema
 }
 fn route_list_result() -> Value {
@@ -1203,7 +1207,11 @@ fn route_list_result() -> Value {
     })
 }
 fn summary_route(v: &Value) -> String {
-    let what = if v["removed"] == true { "removed" } else { "serving" };
+    let what = if v["removed"] == true {
+        "removed"
+    } else {
+        "serving"
+    };
     let state = if v["reloaded"] == true {
         "the edge took it"
     } else if v["applied"] == true {
