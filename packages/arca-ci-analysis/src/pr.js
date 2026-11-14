@@ -182,7 +182,11 @@ function setRunner(lines, doc, change) {
     const job = doc.jobs[id];
     if (job?.['runs-on'] !== from) throw new Error(`job ${id} does not run on ${from}`);
     const at = job[LINES]['runs-on'] - 1;
-    const replaced = lines[at].replace(/(runs-on:\s*)(["']?)([^"'#\s]+)\2/, (m, head, quote, value) => (value === from ? `${head}${quote}${to}${quote}` : m));
+    // An expression holds single quotes: inside single quotes it would end the string, so it goes in double ones.
+    const around = (quote) => (quote === "'" && to.includes("'") ? '"' : quote);
+    const replaced = lines[at].replace(/(runs-on:\s*)(["']?)([^"'#\s]+)\2/, (m, head, quote, value) =>
+      value === from ? `${head}${around(quote)}${to}${around(quote)}` : m,
+    );
     if (replaced === lines[at]) throw new Error(`the runs-on line of ${id} is not one plain value`);
     lines[at] = replaced;
   }
@@ -288,6 +292,9 @@ function checkText(change) {
     case 'add-input':
       return `From the second run on, ${change.input}: ${change.value} restores the package cache ("Cache restored from key" in the log) and the install step is shorter.`;
     case 'set-runner':
+      if (change.pool) {
+        return `The moved jobs run on ${change.pool} for pushes and for pull requests from branches of this repository, and pass as before; their time stays within the p95 above, since each is short. This repository is public: a pull request from a fork would run its own code on ${change.pool}, the owner's machines, so the runs-on expression sends those to ${change.forks} instead. Open one from a fork to see it there. Nothing else changes runner.`;
+      }
       return `The moved jobs run on ${[...new Set(change.jobs.map((job) => job.to))].join(', ')} and pass as before; their time stays within the p95 above, since each is short. Nothing else changes runner.`;
     default:
       return '';

@@ -19,12 +19,25 @@ const seconds = (from, to) => (from && to ? Math.max(0, (Date.parse(to) - Date.p
 const round = (n, digits = 0) => (n == null ? null : Math.round(n * 10 ** digits) / 10 ** digits);
 const sum = (values) => values.reduce((a, b) => a + (b ?? 0), 0);
 
+/** A runner label as `--move-to` takes it: one plain runs-on label, which the pull request writes into a workflow. */
+export function checkLabel(label) {
+  if (label == null) return null;
+  if (typeof label !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(label)) {
+    throw new Error(`--move-to takes one runner label (letters, digits, '.', '_' and '-'), not ${JSON.stringify(label)}`);
+  }
+  return label;
+}
+
+/** The runs-on of a moved job in a public workflow that pull requests start: pull requests from forks stay on GitHub. */
+export const forkSafe = (label) => `\${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || '${label}' }}`;
+
 /**
  * @param {object} data a dataset (collect.js)
  * @param {object} [options]
  * @param {string} [options.moveTo] the runs-on label of the owner's own runner pool, where short billed jobs move
  */
 export function analyze(data, options = {}) {
+  const moveTo = checkLabel(options.moveTo ?? null);
   const scale = 7 / (data.window.days || 7);
   const workflows = Object.fromEntries(
     Object.entries(data.workflows ?? {}).map(([path, text]) => [path, readWorkflow(path, text)]),
@@ -35,7 +48,7 @@ export function analyze(data, options = {}) {
     seconds: DONE.has(job.conclusion) ? seconds(job.startedAt, job.completedAt) : null,
     // Queue counts jobs that a runner took: a skipped job never waits for one.
     queue: job.startedAt && job.labels?.length && job.conclusion !== 'skipped' ? seconds(job.createdAt, job.startedAt) : null,
-    cost: jobCost(job, data.visibility),
+    cost: jobCost(job, data.visibility, moveTo),
     key: `${job.path}::${job.name}`,
   }));
 
@@ -126,7 +139,7 @@ export function analyze(data, options = {}) {
   const tests = testTimes(jobs, data.logs ?? {});
   const cache = cacheStats(jobs, data.logs ?? {}, data.caches ?? {});
 
-  const context = { data, scale, workflows, jobs, runsById, jobRows, workflowRows, runners, flaky, tests, cache, moveTo: options.moveTo ?? null };
+  const context = { data, scale, workflows, jobs, runsById, jobRows, workflowRows, runners, flaky, tests, cache, moveTo };
   const findings = [
     ...failingWorkflows(context),
     ...paidRunners(context),
@@ -413,17 +426,19 @@ function failingWorkflows({ data, scale, workflowRows, jobs }) {
 /**
  * Short jobs on a billed runner that an unbilled one would run as well: the free GitHub-hosted runner of a public
  * repository, or, when `moveTo` names one, the label of the repository owner's own runner pool (whatever the
- * repository's visibility).
+ * repository's visibility). In a public repository anyone can open a pull request from a fork, and its jobs would run
+ * on that pool: a workflow that pull requests start keeps those on ubuntu-latest (`forkSafe`).
  */
 function paidRunners({ data, scale, workflows, jobRows, moveTo }) {
   if (!moveTo && data.visibility !== 'public') return [];
-  const target = moveTo ?? 'ubuntu-latest';
   const why = moveTo
     ? `${moveTo} is the owner's own runner pool, billed by neither GitHub nor a provider`
     : 'this repository is public, so ubuntu-latest (4 vCPU for public repositories) is not billed';
   const out = [];
   for (const [path, workflow] of Object.entries(workflows)) {
     if (!workflow) continue;
+    const forks = Boolean(moveTo && data.visibility === 'public' && (workflow.on.pull_request || workflow.on.pull_request_target));
+    const target = !moveTo ? 'ubuntu-latest' : forks ? forkSafe(moveTo) : moveTo;
     const moves = [];
     for (const job of workflow.jobs) {
       if (typeof job.runsOn !== 'string' || job.runsOn.includes('${{') || job.uses) continue;
@@ -448,12 +463,24 @@ function paidRunners({ data, scale, workflows, jobRows, moveTo }) {
         `${why}; these jobs run on ${[...new Set(moves.map((m) => m.from))].join(', ')} and cost $${round(usd, 2)} in ${data.window.days} days`,
         ...moves.map((m) => `${m.id}: p50 ${minutesText(m.p50)}, p95 ${minutesText(m.p95)} over ${m.runs} runs, $${round(m.usd, 2)}`),
         'a short job gains little from a faster runner; a job that needs the provider\'s own cache or hardware should stay',
+        ...(forks
+          ? [
+              `this repository is public and pull requests start this workflow: a job on ${moveTo} would run the code of anyone who opens a pull request from a fork on the owner's machines, so the change keeps pull requests from forks on ubuntu-latest (free for public repositories) and moves the rest`,
+            ]
+          : []),
       ],
       weekly: { runnerMinutes: 0, wallMinutes: 0, usd: round(usd * scale, 2) },
       confidence: 'measured',
       mechanical: true,
-      change: { kind: 'set-runner', path, jobs: moves.map((m) => ({ id: m.id, from: m.from, to: m.to })) },
-      suggestion: `Set runs-on: ${target} for ${moves.map((m) => m.id).join(', ')}.`,
+      change: {
+        kind: 'set-runner',
+        path,
+        jobs: moves.map((m) => ({ id: m.id, from: m.from, to: m.to })),
+        ...(forks ? { pool: moveTo, forks: 'ubuntu-latest' } : {}),
+      },
+      suggestion: forks
+        ? `Run ${moves.map((m) => m.id).join(', ')} on ${moveTo}, except for pull requests from forks, which stay on ubuntu-latest.`
+        : `Set runs-on: ${target} for ${moves.map((m) => m.id).join(', ')}.`,
     });
   }
   return out;

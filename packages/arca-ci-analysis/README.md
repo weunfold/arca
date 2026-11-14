@@ -52,6 +52,16 @@ node src/pr-cli.js --report out/acme__app/report.json --workdir work/ --open   #
 repository under the signed-in account, pushes the branch there and opens a draft pull request. It never pushes to the
 repository itself and never merges.
 
+`pr-cli.js` assumes a public repository: it clones over anonymous https. For a private one, let git use your GitHub
+sign-in first (`gh auth setup-git`), and know that `--open` works only where the organisation allows forks of its
+private repositories.
+
+`--move-to` (or `MOVE_TO`) takes one runner label: letters, digits, `.`, `_` and `-`. Jobs that already carry it are
+counted as your own pool, at no charge. In a public repository anyone can open a pull request from a fork, and a job
+on your pool would run that code on your machines; so where pull requests start a workflow, the change writes
+`runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || '<label>' }}`, which keeps pull requests
+from forks on GitHub's free runner, and the evidence and the pull request text say so.
+
 ## As an Arca function
 
 Without `--out` the CLI prints each repository's Markdown report, shortened to fit the 64 KiB of output Arca keeps,
