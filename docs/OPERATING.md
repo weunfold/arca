@@ -186,7 +186,7 @@ refused without the value being echoed back.
 | `canvasOrigin` | no | The loopback DSH origin the remote canvas proxies: an `http://` literal loopback IP and port, with no path. Default `http://127.0.0.1:3081`; any other origin refuses the config before `serve` listens. |
 | `approval.trustOwnerKeysFrom` | no | Absolute paths of other kernels' owner passkeys files on this machine, which this kernel also trusts, read-only, for action approvals only (never to change its own passkeys). See "Approving on another kernel of this machine". |
 | `approval.origins` | with `trustOwnerKeysFrom` | The page origins (`approvalOrigin` form) a passkey from those files may answer from. A line for any other origin is not trusted. |
-| `approval.linkedHosts` | no | `[{ "name": "<host>", "socket": "<path>", "tokenFile": "<path>" }]`: the kernels on this machine whose proposals this kernel's approval page lists and relays approvals to. |
+| `approval.linkedHosts` | no | `[{ "name": "<host>", "socket": "<path>", "tokenFile": "<path>", "incusSocket": "<path>" }]`: the kernels on this machine whose proposals this kernel's approval page lists and relays approvals to. The optional `incusSocket` is that host's Incus socket on this machine (local, or forwarded to a path here); `instance_move_preflight` reads the host through it, with GETs only. |
 
 The config is refused, with exit 2, when:
 
@@ -1797,7 +1797,7 @@ unix socket. The verbs
 in this build are `arca_status`, `node_metrics`, `watch_report`, `alerts_list`, `token_list`, `journal_list`, `plan_list`,
 `action_propose`, `plan_decline`, `approval_submit`, `action_approve`, `peer_keys_sync`, the Postgres and ontology verbs, `service_create`, `service_list` and
 `service_status`, `gpu_attach` and `gpu_detach`, `storage_list`, `storage_add`, `snapshot_create`, `snapshot_list` and
-`snapshot_delete`, and `instance_start`, `instance_stop` and `instance_restart`.
+`snapshot_delete`, `instance_start`, `instance_stop` and `instance_restart`, and `instance_move_preflight`.
 
 The unix socket serves only a peer whose credentials carry the server's own uid. Any other peer is closed before a byte of
 its request is read.
@@ -2170,6 +2170,72 @@ with `"secrets":null`: it names the secrets and never holds a value or a reason 
 The `begin` line is durable before anything is sent to Incus:
 when it cannot be written (the file is a link, or is not mode 0600) the call is refused with `InstanceJournalUnavailable`
 and nothing changes. A file past 8 MiB is set aside as `instance-actions.jsonl.1`, replacing the one set aside before.
+
+## Before moving an instance: `instance_move_preflight`
+
+`instance_move_preflight` (viewer) answers, before anything is moved, whether a target node can take each instance and
+what to fix first. It changes nothing: it sends only GETs, to this node's Incus and to the target's, and walks the
+instance's storage folder on this host to measure it. Nothing is stopped, started, copied or created, no proposal is
+recorded, and no journal or state file is written. Every finding is a check in the instance's row; the verb itself
+refuses only arguments it cannot read.
+
+It takes `instances`, a list of 1 to 50 `{project, name}` references on this node (one instance is a list of one), the
+`target`, and an optional `live` (default `false`). The target is one of this kernel's linked hosts
+(`approval.linkedHosts`), named as the config names it, whose `incusSocket` is that host's Incus socket here. A target
+with no such linked host, with no `incusSocket`, or whose Incus does not answer is not a refusal: `target.reachable` is
+`false`, `target.reason` says why, and every row is no-go with that reason.
+
+The answer has one row per instance, in the order asked: its `project`, `name` and `target`, `go`, a `reason` when it is
+no-go, and eight `checks`, always all eight and always in this order. Each check is `ok` or not, with a `detail` an
+operator can act on, `findings` (each with its `subject`, `ok`, `detail` and a `proposal`), and `risks` that do not
+block the move by themselves. `go` is true only when every check is ok.
+
+| Check | What it reads | Not ok when |
+|-------|---------------|-------------|
+| `size` | Everything that lands on the target pool, measured on this host by walking it: the instance's own folder (`<incus dir>/storage-pools/<pool>/containers/<project>_<name>`, or `virtual-machines/`), its snapshots (each counted in full, so the need is an upper bound), each custom volume it mounts that is not on the target yet and lands on the same pool (Incus keeps it at `custom/<project>_<name>`, `default_<name>` when the instance's project does not set `features.storage.volumes`), and each host folder it mounts. A file counts at its size or its blocks, whichever is larger, and a file with several links once. On btrfs and dir the folders are always there; on zfs, lvm and ceph a container's volume is walked only while Incus has it mounted, and a virtual machine's disk there is a block volume that is not walked. Incus's own usage figure is never used: it leaves out data shared with a snapshot or an image clone. It adds 10% headroom and compares that with the target pool's free space less every earlier instance of the same call that fits there. `measure` holds every number, part by part. | The need is larger than what is left, or the free space cannot be read. The row also gives the need without the snapshots (`neededWithoutSnapshotsBytes`, `fitsWithoutSnapshots`) and says "fits without snapshots" when only that one fits. When anything cannot be walked (an unmounted or block volume, an unknown driver, a folder the kernel's user cannot read) the size is not measured: not ok, with `measure.notMeasured` and the detail giving the reason. |
+| `storageDriver` | The driver of the instance's pool here and of the target pool (the pool of the same name, else the one the target's default profile names). | The target has no such pool. A move across drivers is ok, with `crossesDriver: true` and the risk said: Incus copies the files one by one instead of sending a btrfs or zfs stream. |
+| `cpu` | Both hosts' CPU features (`/1.0/resources`), their x86-64 levels, and whether the target runs the instance's architecture. | The target does not run the architecture; or, with `live: true`, it lacks any CPU feature of this host (`missingFeatures` names them). On a cold move a missing feature is a risk: programs built for this host's CPU may use it. |
+| `devices` | Each GPU, GPU node (`/dev/dri/...`), other `unix-char` or `unix-block` device, USB and PCI device, custom volume and host folder disk. | The target lacks it. A host device Incus does not list cannot be confirmed and is not ok unless the device says `required=false`. A host folder disk is always not ok: its data stays here, and the proposal names a custom volume on the target to copy it into. |
+| `networks` | Each network card's network or parent, and its fixed address. | The target has no such network (the proposal names the same subnet as here), the fixed address is outside the target network's subnet, or another card holds it there. |
+| `projectsProfilesAcls` | The project and its `features.*`, each profile, and each ACL the cards or their networks name. | One is missing on the target or differs from here; each is named. |
+| `proxyListen` | Each proxy device's listen address. | It listens on an address of this host that the target does not hold; the proposal names the target's own addresses. Every-address and loopback listens move as they are. |
+| `macvlanParents` | Each macvlan card's parent interface, matched against the target's own interface names. | The target has no interface of that name. On IncusOS the bridge carries the network card's name and a `_p...` port is not a parent, so the proposal lists the target's own names. |
+
+To measure, the kernel's user needs read access to the Incus storage folders (`/var/lib/incus/storage-pools` and
+below) and to every host folder an instance mounts. On a standard host those are `root:root` with mode 0711, so a kernel
+that runs as an ordinary user cannot list them: its `size` check says "not measured" with the permission error and the
+path, and every other check still answers. Give the kernel's user read access there (for example through an ACL), or
+read the size from a kernel that can.
+
+A worked example. `node-a` holds the container `web` in the project `shop`, 4.0 GiB on a btrfs pool, with a fixed address
+on `arcabr0` and a proxy on `node-a`'s own address. Its config links `node-b`:
+
+```json
+"approval": { "linkedHosts": [ { "name": "node-b", "socket": "/run/arca-node-b/arca.sock",
+  "tokenFile": "/etc/arca/node-b-relay.secret", "incusSocket": "/run/arca-node-b/incus.sock" } ] }
+```
+
+```
+arca call instance_move_preflight '{"instances":[{"project":"shop","name":"web"}],"target":"node-b"}'
+```
+
+```json
+{ "target": { "name": "node-b", "reachable": true, "reason": null }, "live": false,
+  "rows": [ { "project": "shop", "name": "web", "target": "node-b", "go": false, "reason": "not ok: proxyListen",
+    "checks": [
+      { "check": "size", "ok": true, "detail": "measured 4.0 GiB (4294967296 bytes) by walking the instance 4.0 GiB at /var/lib/incus/storage-pools/default/containers/shop_web; with 10% headroom it needs 4.4 GiB. node-b's pool default has 120.0 GiB free, minus 0 B pending for earlier moves to it = 120.0 GiB available: it fits", "findings": [], "risks": [],
+        "measure": { "method": "walked", "measuredBytes": 4294967296, "headroomBytes": 429496729, "neededBytes": 4724464025, "targetFreeBytes": 128849018880, "pendingBytes": 0, "availableBytes": 128849018880, "...": "..." } },
+      { "check": "proxyListen", "ok": false, "detail": "not ok: https", "risks": [],
+        "findings": [ { "subject": "https", "ok": false,
+          "detail": "the proxy https listens on 203.0.113.10 port 443, an address of this host (enp6s0) that node-b does not have; on node-b it would not listen",
+          "proposal": "re-point https's listen to one of node-b's own addresses: 203.0.113.20 (br-lan), or to 0.0.0.0 for every address" } ] },
+      "... the other six checks, each ok ..."
+    ] } ] }
+```
+
+The operator re-points the proxy, then asks again; `go` turns true. Several instances in one call are sized one after
+another against the same pool: an earlier one that fits counts as pending for the later ones, and its name is in their
+`detail` and in `measure.pendingFor`.
 
 ## Snapshot storage and snapshots
 
