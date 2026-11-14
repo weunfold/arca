@@ -164,13 +164,21 @@ impl Server {
         })
     }
 
-    /// `401`, naming the protected resource metadata when there is an authorization server.
-    fn unauthorized(&self) -> Response {
+    /// `401`, naming the protected resource metadata when there is an authorization server. A request that presented a
+    /// token this server does not take (unknown, expired or revoked) is also told `invalid_token` (RFC 6750 3.1).
+    fn unauthorized(&self, headers: &HeaderMap) -> Response {
         match &self.oauth {
-            Some((_, metadata)) => challenge(
-                StatusCode::UNAUTHORIZED,
-                &format!("Bearer resource_metadata=\"{metadata}\", scope=\"viewer\""),
-            ),
+            Some((_, metadata)) => {
+                let error = if bearer(headers).is_some() {
+                    "error=\"invalid_token\", "
+                } else {
+                    ""
+                };
+                challenge(
+                    StatusCode::UNAUTHORIZED,
+                    &format!("Bearer {error}resource_metadata=\"{metadata}\", scope=\"viewer\""),
+                )
+            }
             None => unauthorized(),
         }
     }
@@ -311,7 +319,7 @@ async fn not_found() -> StatusCode {
 
 async fn mcp(State(server): State<Arc<Server>>, headers: HeaderMap, body: Bytes) -> Response {
     let Some(caller) = server.authenticate(&headers) else {
-        return server.unauthorized();
+        return server.unauthorized(&headers);
     };
     let mirrors = Mirrors {
         version: mirrored(&headers, "mcp-protocol-version"),
@@ -334,7 +342,7 @@ async fn mcp(State(server): State<Arc<Server>>, headers: HeaderMap, body: Bytes)
         Ok(Some(answer)) => (answer.status, Json(answer.body)).into_response(),
         Ok(None) => StatusCode::ACCEPTED.into_response(),
         Err(CallError::Forbidden { verb }) => server.forbidden(&caller, &verb),
-        Err(CallError::Unauthenticated) => server.unauthorized(),
+        Err(CallError::Unauthenticated) => server.unauthorized(&headers),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -368,7 +376,7 @@ async fn serve_get(
     headers: HeaderMap,
 ) -> Response {
     let Some(caller) = server.authenticate(&headers) else {
-        return server.unauthorized();
+        return server.unauthorized(&headers);
     };
     // The route is its verb's reading over GET: a token the verb does not admit, by scope or by tool list, is refused
     // here as a `tools/call` of the verb is.
@@ -386,7 +394,7 @@ async fn serve_get(
         Ok(Ok(reply)) => ([(header::CONTENT_TYPE, reply.content_type)], reply.body).into_response(),
         Ok(Err(CallError::Invalid(_))) => StatusCode::BAD_REQUEST.into_response(),
         Ok(Err(CallError::Forbidden { .. })) => StatusCode::FORBIDDEN.into_response(),
-        Ok(Err(CallError::Unauthenticated)) => server.unauthorized(),
+        Ok(Err(CallError::Unauthenticated)) => server.unauthorized(&headers),
         Ok(Err(CallError::NotFound)) => StatusCode::NOT_FOUND.into_response(),
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }

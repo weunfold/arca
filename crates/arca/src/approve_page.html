@@ -1196,10 +1196,11 @@ function appCard(app) {
     row.append(detail);
     facts.append(row);
   };
-  const grant = app.grants[0] || {};
+  // The most the app may do across its live grants, and when it last used any of them: an app the owner stepped up
+  // holds a grant for each approval.
   fact("Answers go to", (app.redirectHosts || []).join(", "));
-  fact("Allowed", String(grant.scope));
-  fact("Last used", grant.lastUsedAt ? new Date(grant.lastUsedAt).toLocaleString() : "not since Arca started");
+  fact("Allowed", String(app.scope));
+  fact("Last used", app.lastUsedAt ? new Date(app.lastUsedAt).toLocaleString() : "not since Arca started");
   fact("Client id", String(app.clientId));
   card.append(facts);
   const button = el("button", "btn btn-secondary", "Disconnect");

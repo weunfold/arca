@@ -147,6 +147,18 @@ struct Grant {
     access: Vec<Hashed>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     revoked_at: Option<u64>,
+    /// What the owner approved, which a refresh may narrow for one token pair and never loses: a refresh with no
+    /// `scope` gets it back (RFC 6749 6). Absent in a store written before it was kept; `scope` and `tools` stand in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    approved: Option<Approved>,
+}
+
+/// The scope and tool list the owner's passkey approved for a grant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Approved {
+    scope: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -376,6 +388,18 @@ impl OAuth {
         File::open(&self.state_dir)?.sync_all()
     }
 
+    /// Saves a revocation: once more if the first write fails, then a log line. A grant ended in memory and not on disk
+    /// would come back at the next start, so the caller says so to whoever asked. Answers whether it was saved.
+    fn persist_revoked(&self, inner: &Inner) -> bool {
+        if self.persist(inner).is_ok() || self.persist(inner).is_ok() {
+            return true;
+        }
+        (self.log)(
+            "arca: a revoked MCP grant was not saved: it ends now, but would work again after a restart; revoke it again",
+        );
+        false
+    }
+
     fn journal(&self, now: u64, event: &str, fields: Value) {
         let mut line = json!({ "at": iso_utc(now), "event": event });
         if let (Some(line), Value::Object(fields)) = (line.as_object_mut(), fields) {
@@ -563,12 +587,27 @@ impl OAuth {
             }
         };
         let state = param("state").map(str::to_string);
+        // An error is sent back to the redirect only for a client the owner approved before: registration is open, so
+        // for any other the redirect is not trusted yet, and the error stays on this page instead of making the page's
+        // own address a link to anywhere (RFC 9700 4.11.2; MCP authorization, "Open Redirection").
+        let trusted = inner.stored.grants.iter().any(|grant| {
+            grant.client_id == client.id
+                && grant.revoked_at.is_none()
+                && grant
+                    .refresh
+                    .as_ref()
+                    .is_some_and(|token| now < token.expires)
+        });
         let back = |error: OAuthError| {
-            Err(AuthorizeFail::Redirect {
-                uri: redirect_uri.clone(),
-                state: state.clone(),
-                error,
-            })
+            if trusted {
+                Err(AuthorizeFail::Redirect {
+                    uri: redirect_uri.clone(),
+                    state: state.clone(),
+                    error,
+                })
+            } else {
+                Err(AuthorizeFail::Page(error))
+            }
         };
         if param("response_type") != Some("code") {
             return back(OAuthError::new(
@@ -863,8 +902,11 @@ impl OAuth {
             // A code used a second time takes back what it made (OAuth 2.1, 4.1.3).
             if let Some((grant, _)) = inner.used_codes.remove(&code_hash) {
                 let client = revoke_grant(&mut inner, &grant, now);
-                let _ = self.persist(&inner);
+                let saved = self.persist_revoked(&inner);
                 drop(inner);
+                if !saved {
+                    return Err(not_saved());
+                }
                 self.journal(
                     now,
                     "code_reused",
@@ -926,6 +968,10 @@ impl OAuth {
                 expires: now + ACCESS_TTL_MS,
             }],
             revoked_at: None,
+            approved: Some(Approved {
+                scope: code.scope.as_str().to_string(),
+                tools: code.tools.clone(),
+            }),
         };
         inner
             .used_codes
@@ -963,8 +1009,11 @@ impl OAuth {
                 .map(|grant| grant.id.clone())
             {
                 let client = revoke_grant(&mut inner, &grant, now);
-                let _ = self.persist(&inner);
+                let saved = self.persist_revoked(&inner);
                 drop(inner);
+                if !saved {
+                    return Err(not_saved());
+                }
                 self.journal(
                     now,
                     "refresh_reused",
@@ -997,9 +1046,13 @@ impl OAuth {
                 format!("the grant is for {}", grant.resource),
             ));
         }
-        let granted = level(&grant.scope).ok_or_else(|| invalid("the grant is damaged"))?;
+        let (granted, granted_tools) = match &grant.approved {
+            Some(approved) => (level(&approved.scope), approved.tools.clone()),
+            None => (level(&grant.scope), grant.tools.clone()),
+        };
+        let granted = granted.ok_or_else(|| invalid("the grant is damaged"))?;
         let (scope, tools) = match param("scope") {
-            None => (granted, grant.tools.clone()),
+            None => (granted, granted_tools),
             Some(asked) => {
                 let (scope, tools) =
                     parse_scope(asked).map_err(|why| OAuthError::new("invalid_scope", why))?;
@@ -1013,7 +1066,7 @@ impl OAuth {
                         ),
                     ));
                 }
-                let tools = match (&grant.tools, tools) {
+                let tools = match (&granted_tools, tools) {
                     (None, tools) => tools,
                     (Some(held), None) => Some(held.clone()),
                     (Some(held), Some(asked)) => {
@@ -1056,8 +1109,9 @@ impl OAuth {
         Ok(answer)
     }
 
-    /// RFC 7009: an access token is dropped alone; a refresh token ends its grant. An unknown token is no error.
-    fn revoke_token(&self, form: &HashMap<String, String>) {
+    /// RFC 7009: an access token is dropped alone; a refresh token ends its grant. An unknown token is no error. A
+    /// revocation that could not be saved is `503` (RFC 7009 2.2.1), so the client tries again.
+    fn revoke_token(&self, form: &HashMap<String, String>) -> Result<(), OAuthError> {
         let now = self.now();
         let presented = hash_hex(form.get("token").map(String::as_str).unwrap_or_default());
         let mut inner = self.lock();
@@ -1077,16 +1131,20 @@ impl OAuth {
         }
         if let Some(grant) = &ended {
             let client = revoke_grant(&mut inner, grant, now);
-            let _ = self.persist(&inner);
+            let saved = self.persist_revoked(&inner);
             drop(inner);
+            if !saved {
+                return Err(not_saved());
+            }
             self.journal(
                 now,
                 "revoked",
                 json!({ "client": client, "grant": grant, "by": "client" }),
             );
-        } else if changed {
-            let _ = self.persist(&inner);
+        } else if changed && !self.persist_revoked(&inner) {
+            return Err(not_saved());
         }
+        Ok(())
     }
 
     // ---------------------------------------------------------------------------------------------------------------
@@ -1103,15 +1161,29 @@ impl OAuth {
             .iter()
             .filter(|client| client.revoked_at.is_none())
             .map(|client| {
-                let grants: Vec<Value> = inner
+                let live: Vec<&Grant> = inner
                     .stored
                     .grants
                     .iter()
                     .filter(|grant| grant.client_id == client.id && grant.revoked_at.is_none())
                     .filter(|grant| grant.refresh.as_ref().is_some_and(|token| now < token.expires))
+                    .collect();
+                // What the app may do is the most any of its live grants allows, and it was last used when any was: a
+                // step-up adds a grant beside the first, and the card must not keep showing the first.
+                let most = live
+                    .iter()
+                    .max_by_key(|grant| level(&approved_scope(grant).0).unwrap_or(Scope::Viewer));
+                let last_used = live
+                    .iter()
+                    .filter_map(|grant| inner.last_used.get(&grant.id))
+                    .max()
+                    .map(|at| iso_utc(*at));
+                let grants: Vec<Value> = live
+                    .iter()
                     .map(|grant| {
+                        let (scope, tools) = approved_scope(grant);
                         json!({
-                            "scope": scope_text(level(&grant.scope).unwrap_or(Scope::Viewer), grant.tools.as_deref()),
+                            "scope": scope_text(level(&scope).unwrap_or(Scope::Viewer), tools.as_deref()),
                             "approvedAt": iso_utc(grant.approved_at),
                             "lastUsedAt": inner.last_used.get(&grant.id).map(|at| iso_utc(*at)),
                             "expiresAt": grant.refresh.as_ref().map(|token| iso_utc(token.expires)),
@@ -1121,6 +1193,11 @@ impl OAuth {
                 json!({
                     "clientId": client.id,
                     "name": client.name,
+                    "scope": most.map(|grant| {
+                        let (scope, tools) = approved_scope(grant);
+                        scope_text(level(&scope).unwrap_or(Scope::Viewer), tools.as_deref())
+                    }),
+                    "lastUsedAt": last_used,
                     "nameShared": Self::name_shared(&inner, client),
                     "redirectHosts": client.redirect_uris.iter().map(|uri| redirect_host(uri)).collect::<Vec<_>>(),
                     "registeredAt": iso_utc(client.registered_at),
@@ -1258,6 +1335,14 @@ impl IssuedTokens for OAuth {
     }
 }
 
+/// The scope and tools the owner approved for `grant`: what it keeps across narrowing refreshes.
+fn approved_scope(grant: &Grant) -> (String, Option<Vec<String>>) {
+    match &grant.approved {
+        Some(approved) => (approved.scope.clone(), approved.tools.clone()),
+        None => (grant.scope.clone(), grant.tools.clone()),
+    }
+}
+
 /// Ends a grant: no token of it works again. Answers the client it belonged to.
 fn revoke_grant(inner: &mut Inner, id: &str, now: u64) -> String {
     let mut client = String::new();
@@ -1280,6 +1365,15 @@ fn token_answer(access: &str, refresh: &str, grant: &Grant) -> Value {
         "refresh_token": refresh,
         "scope": scope_text(level(&grant.scope).unwrap_or(Scope::Viewer), grant.tools.as_deref()),
     })
+}
+
+/// A revocation that could not be saved: the client should try again.
+fn not_saved() -> OAuthError {
+    OAuthError::new(
+        "temporarily_unavailable",
+        "the revocation could not be saved: try again",
+    )
+    .status(StatusCode::SERVICE_UNAVAILABLE)
 }
 
 fn find_pending<'a>(inner: &'a Inner, id: &str) -> Result<&'a Pending, Refusal> {
@@ -1690,7 +1784,7 @@ async fn token(State(oauth): State<Arc<OAuth>>, body: Bytes) -> Response {
 
 async fn revoke(State(oauth): State<Arc<OAuth>>, body: Bytes) -> Response {
     let outcome =
-        tokio::task::spawn_blocking(move || form(&body).map(|form| oauth.revoke_token(&form)))
+        tokio::task::spawn_blocking(move || form(&body).and_then(|form| oauth.revoke_token(&form)))
             .await;
     match outcome {
         Ok(Ok(())) => StatusCode::OK.into_response(),

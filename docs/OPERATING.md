@@ -1929,15 +1929,19 @@ In Claude Desktop, add a custom connector with the same URL. Then, in the client
 
 **Approve with passkey** signs you in and approves in one tap: the passkey signs a statement (action `mcp_authorize`, the
 app's client id, a digest of the whole request) that the kernel checks as it checks every approval, owner passkeys only,
-and spends once. **Don't allow** sends the app `access_denied`.
+and spends once. **Don't allow** sends the app `access_denied`. A request that is wrong before you see it (no PKCE, a
+foreign `resource`, `admin`) is answered on the page itself while the app has never been approved, and sent back to the
+app only once you approved it before, so the page's address never becomes a link to a stranger's site.
 
 The app then holds an access token for one hour and a refresh token for thirty days. Each refresh token works once and is
 replaced at each refresh; one used a second time ends the grant, since someone holds a copy. A refresh may narrow the scope
-and never widen it. An app asks for `viewer` first; when it calls a verb above its scope, the door answers `403` with
+of the tokens it gets and never widen it; a refresh that names no scope gets back what you approved. A token that is
+expired or revoked is answered `401` with `error="invalid_token"`. An app asks for `viewer` first; when it calls a verb above its scope, the door answers `403` with
 `WWW-Authenticate: Bearer error="insufficient_scope", scope="<scope the verb needs>"`, and the app asks you again for that
 scope. `admin` is never granted to an app: the admin token stays a stored one.
 
-The approval page lists the connected apps under **Connected apps**, with **Disconnect**. On the node's own terminal:
+The approval page lists the connected apps under **Connected apps**, each with the most it may do across its approvals
+and when it was last used, and **Disconnect**. On the node's own terminal:
 
 ```text
 arca oauth list [--config <file>]
@@ -1956,7 +1960,7 @@ What the node serves, all on `approvalOrigin`:
 | `POST /oauth/register` | RFC 7591 registration: redirect URIs are exact, and `https`, or `http` on `127.0.0.1`, `[::1]` or `localhost` |
 | `GET /oauth/authorize` | the consent page; `resource` (RFC 8707) must be `<origin>/mcp` |
 | `POST /oauth/token` | `authorization_code` with the PKCE verifier, `refresh_token` with rotation |
-| `POST /oauth/revoke` | RFC 7009: an access token alone, or a refresh token and its grant |
+| `POST /oauth/revoke` | RFC 7009: an access token alone, or a refresh token and its grant; `503` when the revocation could not be saved (the grant has ended until the next start; try again) |
 
 Files in the state directory: `mcp-oauth.json` (the apps and their grants, with only the SHA-256 of each token, mode 0600)
 and `mcp-oauth-journal.jsonl` (each registration, grant, denial and revocation, and each refresh token or code used twice;

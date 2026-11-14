@@ -453,6 +453,18 @@ fn an_mcp_client_given_only_the_url_is_told_where_to_ask_and_the_metadata_names_
             "Bearer resource_metadata=\"{ORIGIN}/.well-known/oauth-protected-resource/mcp\", scope=\"viewer\""
         )
     );
+    // A token that is presented and not taken is told so (RFC 6750 3.1); with no token, the challenge stays bare.
+    let dead = rig.mcp(
+        Some("arca_at_0123456789012345678901234567890123456789012"),
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    );
+    assert_eq!(dead.status, 401);
+    assert_eq!(
+        dead.header("www-authenticate").expect("a challenge"),
+        format!(
+            "Bearer error=\"invalid_token\", resource_metadata=\"{ORIGIN}/.well-known/oauth-protected-resource/mcp\", scope=\"viewer\""
+        )
+    );
     for path in [
         "/.well-known/oauth-protected-resource/mcp",
         "/.well-known/oauth-protected-resource",
@@ -624,13 +636,24 @@ fn stored_tokens_work_exactly_as_before() {
 fn pkce_is_required_and_a_wrong_verifier_gets_no_token() {
     let (rig, key) = Rig::new("oauth-pkce");
     let client = rig.client("App");
-    for changes in [
+    let bad_pkce = [
         vec![("code_challenge", None)],
         vec![("code_challenge_method", Some("plain"))],
         vec![("code_challenge_method", None)],
         vec![("code_challenge", Some("short"))],
-    ] {
-        let reply = rig.authorize(&client, &changes);
+    ];
+    // Before the owner approved the client, its redirect is not trusted: the error stays on the page.
+    for changes in &bad_pkce {
+        let reply = rig.authorize(&client, changes);
+        assert_eq!(reply.status, 400, "{changes:?}");
+        assert_eq!(reply.header("location"), None);
+        assert!(reply.text().contains("PKCE"), "{}", reply.text());
+    }
+    let first = rig.code(&key, &client, "viewer");
+    assert_eq!(rig.exchange(&client, &first).status, 200);
+    // Once the owner approved it, the error goes back to the client, with its state.
+    for changes in &bad_pkce {
+        let reply = rig.authorize(&client, changes);
         assert_eq!(reply.status, 302, "{changes:?}");
         let location = reply.header("location").expect("a redirect");
         assert!(location.starts_with(REDIRECT));
@@ -670,9 +693,13 @@ fn a_token_for_another_resource_is_never_issued() {
         &client,
         &[("resource", Some("https://other.example.com/mcp"))],
     );
-    assert_eq!(reply.status, 302);
-    let location = reply.header("location").expect("a redirect");
-    assert_eq!(param(&location, "error").as_deref(), Some("invalid_target"));
+    assert_eq!(reply.status, 400);
+    assert_eq!(reply.header("location"), None);
+    assert!(
+        reply.text().contains("issues tokens for"),
+        "{}",
+        reply.text()
+    );
     // The canonical form of this resource is accepted.
     let fine = rig.authorize(
         &client,
@@ -789,9 +816,12 @@ fn admin_is_never_granted_and_a_refresh_never_widens_the_scope() {
     let (rig, key) = Rig::new("oauth-scope");
     let client = rig.client("App");
     let reply = rig.authorize(&client, &[("scope", Some("operator admin"))]);
-    assert_eq!(reply.status, 302);
-    let location = reply.header("location").expect("a redirect");
-    assert_eq!(param(&location, "error").as_deref(), Some("invalid_scope"));
+    assert_eq!(reply.status, 400);
+    assert!(
+        reply.text().contains("admin is never granted"),
+        "{}",
+        reply.text()
+    );
 
     let (client, _, refresh) = rig.connected(&key, "Viewer app", "viewer");
     let wider = rig.refresh(&client, &refresh, Some("doctor"));
@@ -811,6 +841,81 @@ fn admin_is_never_granted_and_a_refresh_never_widens_the_scope() {
     let narrower = rig.refresh(&client, &refresh, Some("viewer"));
     assert_eq!(narrower.status, 200, "{}", narrower.text());
     assert_eq!(narrower.json()["scope"], json!("viewer tool:service_list"));
+    // A narrowing refresh narrows that token pair only: a refresh with no scope gets what the owner approved back
+    // (RFC 6749 6), and asking for it again is no widening.
+    let next = narrower.json()["refresh_token"]
+        .as_str()
+        .expect("a refresh")
+        .to_string();
+    let back = rig.refresh(&client, &next, None);
+    assert_eq!(back.status, 200, "{}", back.text());
+    assert_eq!(back.json()["scope"], json!("doctor tool:service_list"));
+    let next = back.json()["refresh_token"]
+        .as_str()
+        .expect("a refresh")
+        .to_string();
+    let again = rig.refresh(&client, &next, Some("doctor"));
+    assert_eq!(again.status, 200, "{}", again.text());
+    assert_eq!(again.json()["scope"], json!("doctor tool:service_list"));
+}
+
+#[test]
+fn the_owners_list_shows_the_most_an_app_may_do_and_its_latest_use_after_a_step_up() {
+    let (rig, key) = Rig::new("oauth-two-grants");
+    // The documented path: the app connects as viewer, a doctor verb answers insufficient_scope, the owner approves doctor.
+    let client = rig.client("App");
+    let viewer = rig.exchange(&client, &rig.code(&key, &client, "viewer"));
+    assert_eq!(viewer.status, 200);
+    let viewer_access = viewer.json()["access_token"]
+        .as_str()
+        .expect("access")
+        .to_string();
+    assert_eq!(rig.tools(&viewer_access), rig.tools(&rig.viewer));
+    rig.advance(60_000);
+    let doctor = rig.exchange(&client, &rig.code(&key, &client, "doctor"));
+    assert_eq!(doctor.status, 200);
+    let doctor_access = doctor.json()["access_token"]
+        .as_str()
+        .expect("access")
+        .to_string();
+    rig.advance(60_000);
+    rig.tools(&doctor_access);
+    let list = rig.get("/approve/oauth/clients").json();
+    let app = &list["clients"][0];
+    assert_eq!(app["grants"].as_array().map(Vec::len), Some(2));
+    assert_eq!(app["grants"][0]["scope"], json!("viewer"));
+    assert_eq!(app["scope"], json!("doctor"));
+    assert_eq!(app["lastUsedAt"], app["grants"][1]["lastUsedAt"]);
+    assert_ne!(app["lastUsedAt"], app["grants"][0]["lastUsedAt"]);
+    // The card reads the app's own fields, never the first grant's.
+    let page = include_str!("../src/approve_page.html");
+    assert!(page.contains("fact(\"Allowed\", String(app.scope))"));
+    assert!(!page.contains("app.grants[0]"));
+}
+
+#[test]
+fn a_revocation_that_cannot_be_saved_is_refused_with_503_and_still_ends_the_grant_now() {
+    let (rig, key) = Rig::new("oauth-unsaved");
+    let (client, access, refresh) = rig.connected(&key, "App", "viewer");
+    let mode = |bits| {
+        fs::set_permissions(&rig.state_dir, fs::Permissions::from_mode(bits)).expect("chmod")
+    };
+    mode(0o500);
+    let reply = rig.send(
+        "POST",
+        "/oauth/revoke",
+        &[],
+        "application/x-www-form-urlencoded",
+        form(&[("token", &refresh), ("client_id", &client)]).as_bytes(),
+    );
+    mode(0o700);
+    assert_eq!(reply.status, 503, "{}", reply.text());
+    assert_eq!(error_of(&reply), "temporarily_unavailable");
+    let call = rig.mcp(
+        Some(&access),
+        json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+    );
+    assert_eq!(call.status, 401);
 }
 
 #[test]
