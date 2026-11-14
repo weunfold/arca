@@ -1349,6 +1349,7 @@ impl Remote {
             name: "gamma".to_string(),
             socket: forwarded.clone(),
             token_file,
+            incus_socket: None,
         }];
         let logs: Arc<Mutex<Vec<String>>> = Arc::default();
         let sink = Arc::clone(&logs);
