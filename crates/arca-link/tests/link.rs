@@ -6,6 +6,10 @@ use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf
 use tokio::{net::UnixListener, time::timeout};
 
 const FORWARD: &[u8] = b"test/1";
+/// The bound on a test that starts nodes and waits out the server's 10-second accept deadline. It only keeps a broken
+/// test from waiting for ever: what the test checks never depends on it, and starting two nodes on a loaded machine
+/// once took most of a 14-second bound before the deadline had even begun.
+const LOADED: Duration = Duration::from_secs(90);
 struct Temp(PathBuf);
 impl Temp {
     fn new() -> Self {
@@ -355,7 +359,7 @@ fn state_is_private_keys_are_stable_and_stale_status_is_refused() {
 
 #[tokio::test]
 async fn first_stream_and_first_pair_line_have_an_accept_deadline() {
-    timeout(Duration::from_secs(14), async {
+    timeout(LOADED, async {
         let (a, b) = (Temp::new(), Temp::new());
         let host = node(&a, "first", false).await;
         let guest = node(&b, "second", false).await;
@@ -371,6 +375,7 @@ async fn first_stream_and_first_pair_line_have_an_accept_deadline() {
             .unwrap();
         let (mut send, _recv) = partial_line.open_bi().await.unwrap();
         send.write_all(b"{").await.unwrap();
+        // Each is closed by the server's accept deadline, and says so: a close for any other reason is not this one.
         let (first, second) = tokio::join!(no_stream.closed(), partial_line.closed());
         assert!(first.to_string().contains("too slow"), "{first}");
         assert!(second.to_string().contains("too slow"), "{second}");
@@ -383,7 +388,7 @@ async fn first_stream_and_first_pair_line_have_an_accept_deadline() {
 
 #[tokio::test]
 async fn pairing_sanitizes_device_names_before_storing() {
-    timeout(Duration::from_secs(10), async {
+    timeout(LOADED, async {
         let (a, b) = (Temp::new(), Temp::new());
         let host = node(&a, "first", false).await;
         let guest = node(&b, "second", false).await;
@@ -703,7 +708,7 @@ async fn forwarded_stream_cap_backpressures_and_every_stream_round_trips() {
 
 #[tokio::test]
 async fn pending_connection_guard_refuses_fifth_and_stream_releases_a_slot() {
-    timeout(Duration::from_secs(8), async {
+    timeout(LOADED, async {
         let (a, b) = (Temp::new(), Temp::new());
         let echo_task = tokio::spawn(echo(UnixListener::bind(a.0.join("echo.sock")).unwrap()));
         let host = node(&a, "first", true).await;
@@ -719,10 +724,16 @@ async fn pending_connection_guard_refuses_fifth_and_stream_releases_a_slot() {
                     .unwrap(),
             );
         }
+        // The fifth is refused by the guard at once. That is told by how it ends, not by the clock: one the guard let in
+        // would sit pending until the accept deadline closed it as too slow.
         match guest.endpoint().connect(addr(&host), FORWARD).await {
             Err(_) => {}
             Ok(connection) => {
-                connection.closed().await;
+                let reason = connection.closed().await;
+                assert!(
+                    !reason.to_string().contains("too slow"),
+                    "the fifth pending connection was let in and only the deadline closed it: {reason}"
+                );
             }
         }
         let (mut send, mut recv) = pending[0].open_bi().await.unwrap();
@@ -744,7 +755,7 @@ async fn pending_connection_guard_refuses_fifth_and_stream_releases_a_slot() {
         echo_task.abort();
     })
     .await
-    .expect("pending guard test must finish before the handshake deadline");
+    .expect("pending guard test deadline");
 }
 
 #[tokio::test]
