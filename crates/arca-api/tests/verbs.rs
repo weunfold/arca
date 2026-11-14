@@ -102,6 +102,14 @@ fn the_table_holds_the_initial_plan_alerts_postgres_and_ontology_verbs_in_order(
             "registry_secret_remove",
             "host_network_restore",
             "instance_move_preflight",
+            "github_oauth_app_set",
+            "github_connect",
+            "github_connect_status",
+            "github_bindings",
+            "github_audit",
+            "github_runner_mint",
+            "github_mint_job",
+            "github_disconnect",
         ]
     );
     assert_eq!(API_VERSION, "0.1.0");
@@ -195,6 +203,14 @@ fn each_verb_has_its_table_row_for_class_scope_and_writes() {
             false,
             false,
         ),
+        ("github_oauth_app_set", VerbClass::L, Scope::Doctor, true, false),
+        ("github_connect", VerbClass::L, Scope::Operator, true, false),
+        ("github_connect_status", VerbClass::L, Scope::Viewer, false, false),
+        ("github_bindings", VerbClass::L, Scope::Viewer, false, false),
+        ("github_audit", VerbClass::L, Scope::Viewer, false, false),
+        ("github_runner_mint", VerbClass::L, Scope::Operator, true, false),
+        ("github_mint_job", VerbClass::L, Scope::Operator, true, false),
+        ("github_disconnect", VerbClass::L, Scope::Operator, true, true),
     ];
     for (name, class, scope, writes, destructive) in rows {
         let v = verb(name).expect("the verb is in the table");
@@ -1422,6 +1438,7 @@ fn every_destructive_verb_takes_an_optional_boolean_confirm_and_no_other_verb_do
             "deploy_rollback",
             "deploy_remove",
             "function_remove",
+            "github_disconnect",
         ]
     );
     for v in verbs() {

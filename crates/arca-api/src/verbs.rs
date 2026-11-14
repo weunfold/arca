@@ -83,7 +83,7 @@ impl Verb {
     }
 }
 
-static VERBS: [Verb; 69] = [
+static VERBS: [Verb; 77] = [
     Verb {
         name: "arca_status",
         summary: "Node status: the API version, the node id, the mode, the uptime, whether Incus answers and the last applied sequence number.",
@@ -1055,7 +1055,406 @@ static VERBS: [Verb; 69] = [
         params: instance_move_preflight_params,
         result: instance_move_preflight_result,
     },
+    Verb {
+        name: "github_oauth_app_set",
+        summary: "Set this node's GitHub OAuth App, which `github_connect` signs people in with: its client ID and client secret. Write-only: no verb, page, log or record shows the secret again. The App asks for the `admin:org` scope; Arca uses each grant once and deletes it.",
+        class: VerbClass::L,
+        min_scope: Scope::Doctor,
+        writes: true,
+        destructive: false,
+        untrusted: false,
+        output_key: None,
+        summary_text: summary_github_oauth_app_set,
+        cut: no_cut,
+        params: github_oauth_app_set_params,
+        result: github_oauth_app_set_result,
+    },
+    Verb {
+        name: "github_connect",
+        summary: "Connect a GitHub organisation's runners through GitHub's device flow. The answer carries a code and an address (github.com/login/device): give both to the person, who types the code there and authorises Arca once (scope admin:org). Arca then gets one runner registration token, puts the runner group in place (the named one, made when missing; the default group when none is named), registers the asked number of runners with exactly the person's labels, each with its own key, and deletes the grant at once. Every step is shown by `github_connect_status` and logged in `github_audit`. The runners' credentials stay in Arca's private store; no verb returns them.",
+        class: VerbClass::L,
+        min_scope: Scope::Operator,
+        writes: true,
+        destructive: false,
+        untrusted: false,
+        output_key: None,
+        summary_text: summary_github_connect,
+        cut: no_cut,
+        params: github_connect_params,
+        result: github_flow_result,
+    },
+    Verb {
+        name: "github_connect_status",
+        summary: "Where a `github_connect` stands: waiting for the person, registering, done or failed, with every step in words as the person should read them. GitHub's own words in a step are data.",
+        class: VerbClass::L,
+        min_scope: Scope::Viewer,
+        writes: false,
+        destructive: false,
+        untrusted: true,
+        output_key: None,
+        summary_text: summary_github_connect,
+        cut: no_cut,
+        params: github_connect_status_params,
+        result: github_flow_result,
+    },
+    Verb {
+        name: "github_bindings",
+        summary: "The GitHub organisations connected to this node: each one's id, mode (oauth, app or push), organisation, status, runner group, label sets and registered runners, and the device flows of the last day. Never a key, a grant, a token or a runner's credential.",
+        class: VerbClass::L,
+        min_scope: Scope::Viewer,
+        writes: false,
+        destructive: false,
+        untrusted: true,
+        output_key: None,
+        summary_text: summary_github_bindings,
+        cut: no_cut,
+        params: github_bindings_params,
+        result: github_bindings_result,
+    },
+    Verb {
+        name: "github_audit",
+        summary: "The GitHub signer's log, oldest first: every connection, registration, mint and grant deletion, with who asked, when, the organisation, runner group, labels, runner and outcome. Optionally of one connection, and at most `limit` lines (default 100, at most 1000).",
+        class: VerbClass::L,
+        min_scope: Scope::Viewer,
+        writes: false,
+        destructive: false,
+        untrusted: true,
+        output_key: None,
+        summary_text: summary_github_audit,
+        cut: no_cut,
+        params: github_audit_params,
+        result: github_audit_result,
+    },
+    Verb {
+        name: "github_runner_mint",
+        summary: "One just-in-time runner configuration from a GitHub connection, for a runner launcher outside the kernel: the connection, a runner name and its labels (exactly one of the connection's label sets), and for a scale set its id. An App connection asks GitHub with the App's key, which never leaves Arca; a push connection hands out the oldest configuration the person's service sent with those labels. The answer's encodedJitConfig registers one runner for one job: give it only to the machine that runs it. Every call, refused ones too, is a line of `github_audit`.",
+        class: VerbClass::L,
+        min_scope: Scope::Operator,
+        writes: true,
+        destructive: false,
+        untrusted: false,
+        output_key: None,
+        summary_text: summary_github_mint,
+        cut: no_cut,
+        params: github_runner_mint_params,
+        result: github_runner_mint_result,
+    },
+    Verb {
+        name: "github_mint_job",
+        summary: "Record which job a minted runner took (repository, run, job, workflow), as a line of `github_audit` beside its mint. A runner's job is not known when it is minted.",
+        class: VerbClass::L,
+        min_scope: Scope::Operator,
+        writes: true,
+        destructive: false,
+        untrusted: false,
+        output_key: None,
+        summary_text: summary_github_mint_job,
+        cut: no_cut,
+        params: github_mint_job_params,
+        result: github_mint_job_result,
+    },
+    Verb {
+        name: "github_disconnect",
+        summary: "Disconnect a GitHub connection from Arca's side: an App is uninstalled from the organisation where GitHub lets it and its key is deleted; a push connection's token and waiting configurations are deleted; a signed-in connection's runner credentials are deleted (its runners stay listed on GitHub, offline, until removed there). Nothing is minted from it again. The answer says what was done and what is left for the person on GitHub.",
+        class: VerbClass::L,
+        min_scope: Scope::Operator,
+        writes: true,
+        destructive: true,
+        untrusted: true,
+        output_key: None,
+        summary_text: summary_github_disconnect,
+        cut: no_cut,
+        params: github_disconnect_params,
+        result: github_binding_record,
+    },
 ];
+
+fn summary_github_mint(v: &Value) -> String {
+    format!(
+        "runner {} minted (mint {})",
+        v["runnerName"].as_str().unwrap_or("?"),
+        v["mintId"]
+    )
+}
+
+fn summary_github_mint_job(_: &Value) -> String {
+    "job recorded".to_string()
+}
+
+fn summary_github_disconnect(v: &Value) -> String {
+    format!(
+        "GitHub connection {} for {}: {}",
+        v["id"].as_str().unwrap_or("?"),
+        v["account"].as_str().unwrap_or("?"),
+        v["status"].as_str().unwrap_or("?")
+    )
+}
+
+fn github_job_schema() -> Value {
+    params(vec![
+        ("repo", true, json!({ "description": "owner/name", "maxLength": 200, "minLength": 3, "type": "string" })),
+        ("runId", false, at_least(0)),
+        ("jobId", false, at_least(0)),
+        ("jobName", false, string_max(300)),
+        ("workflowRef", false, string_max(500)),
+    ])
+}
+
+fn github_runner_mint_params() -> Value {
+    params(vec![
+        ("binding", true, github_binding_schema()),
+        (
+            "runnerName",
+            true,
+            json!({ "description": "The runner's name on GitHub.", "maxLength": 64, "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$", "type": "string" }),
+        ),
+        ("labels", true, github_labels_schema()),
+        ("workFolder", false, json!({ "description": "The runner's work folder; _work when absent.", "maxLength": 200, "minLength": 1, "type": "string" })),
+        ("scaleSetId", false, at_least(1)),
+        ("job", false, github_job_schema()),
+    ])
+}
+
+fn github_runner_mint_result() -> Value {
+    result(vec![
+        ("mintId", true, at_least(1)),
+        ("runnerId", true, at_least(0)),
+        ("runnerName", true, string()),
+        ("runnerGroupId", true, nullable(int())),
+        ("labels", true, array(string())),
+        ("encodedJitConfig", true, string()),
+    ])
+}
+
+fn github_mint_job_params() -> Value {
+    params(vec![("mintId", true, at_least(1)), ("job", true, github_job_schema())])
+}
+
+fn github_mint_job_result() -> Value {
+    result(vec![("ok", true, boolean())])
+}
+
+fn github_disconnect_params() -> Value {
+    with_confirm(params(vec![("binding", true, github_binding_schema())]))
+}
+
+fn summary_github_oauth_app_set(v: &Value) -> String {
+    format!("GitHub OAuth App {} set", v["clientId"].as_str().unwrap_or("?"))
+}
+
+fn summary_github_connect(v: &Value) -> String {
+    format!(
+        "GitHub connection {} for {}: {} ({} step(s))",
+        v["id"].as_str().unwrap_or("?"),
+        v["account"].as_str().unwrap_or("?"),
+        v["state"].as_str().unwrap_or("?"),
+        v["steps"].as_array().map_or(0, Vec::len)
+    )
+}
+
+fn summary_github_bindings(v: &Value) -> String {
+    format!(
+        "{} GitHub connection(s), {} recent device flow(s)",
+        v["bindings"].as_array().map_or(0, Vec::len),
+        v["flows"].as_array().map_or(0, Vec::len)
+    )
+}
+
+fn summary_github_audit(v: &Value) -> String {
+    format!("{} audit line(s)", v["lines"].as_array().map_or(0, Vec::len))
+}
+
+/// A GitHub organisation login.
+fn github_org_schema() -> Value {
+    json!({
+        "description": "The GitHub organisation's login, as in https://github.com/<org>.",
+        "maxLength": 39,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}$",
+        "type": "string"
+    })
+}
+
+/// A GitHub connection's id.
+fn github_binding_schema() -> Value {
+    json!({ "description": "A GitHub connection's id, as `github_bindings` lists it.", "maxLength": 64, "minLength": 1, "type": "string" })
+}
+
+fn github_labels_schema() -> Value {
+    json!({
+        "description": "The runners' labels, exactly as the person chose them: one to twenty, each 1 to 100 characters with no space or comma. None is added.",
+        "items": { "maxLength": 100, "minLength": 1, "type": "string" },
+        "maxItems": 20,
+        "type": "array"
+    })
+}
+
+fn github_oauth_app_set_params() -> Value {
+    params(vec![
+        (
+            "clientId",
+            true,
+            json!({ "description": "The OAuth App's client ID.", "maxLength": 64, "minLength": 1, "pattern": "^[A-Za-z0-9._]+$", "type": "string" }),
+        ),
+        (
+            "clientSecret",
+            true,
+            json!({ "description": "The OAuth App's client secret. Never shown again.", "maxLength": 256, "minLength": 1, "type": "string" }),
+        ),
+    ])
+}
+
+fn github_oauth_app_set_result() -> Value {
+    result(vec![("ok", true, boolean()), ("clientId", true, string())])
+}
+
+fn github_connect_params() -> Value {
+    params(vec![
+        ("org", true, github_org_schema()),
+        (
+            "group",
+            false,
+            json!({ "description": "The runner group, by name. Made when the organisation has none of that name (open to its private repositories, public ones off). Absent: the organisation's default group.", "maxLength": 100, "minLength": 1, "type": "string" }),
+        ),
+        ("labels", true, github_labels_schema()),
+        (
+            "runners",
+            true,
+            json!({ "description": "How many runners to register, 1 to 50.", "maximum": 50, "minimum": 1, "type": "integer" }),
+        ),
+        (
+            "namePrefix",
+            false,
+            json!({ "description": "The start of each runner's name; -1, -2 and so on follow. Absent: arca-<a short id>.", "maxLength": 50, "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$", "type": "string" }),
+        ),
+    ])
+}
+
+fn github_connect_status_params() -> Value {
+    params(vec![(
+        "id",
+        true,
+        json!({ "description": "The id `github_connect` answered.", "maxLength": 64, "minLength": 1, "type": "string" }),
+    )])
+}
+
+fn github_step_schema() -> Value {
+    result(vec![
+        ("at", true, at_least(0)),
+        ("atText", true, string()),
+        ("ok", true, boolean()),
+        ("text", true, string()),
+    ])
+}
+
+fn github_flow_result() -> Value {
+    result(vec![
+        ("id", true, string()),
+        ("account", true, string()),
+        ("group", true, nullable(string())),
+        ("labels", true, array(string())),
+        ("runners", true, at_least(1)),
+        ("userCode", true, string()),
+        ("verificationUri", true, string()),
+        ("expiresAt", true, at_least(0)),
+        (
+            "state",
+            true,
+            one_of(&["waitingForPerson", "registering", "done", "failed"]),
+        ),
+        ("steps", true, array(github_step_schema())),
+        ("binding", true, nullable(string())),
+        ("createdBy", true, string()),
+        ("createdAt", true, at_least(0)),
+    ])
+}
+
+fn github_bindings_params() -> Value {
+    params(vec![])
+}
+
+fn github_binding_record() -> Value {
+    result(vec![
+        ("id", true, string()),
+        ("mode", true, one_of(&["oauth", "app", "push"])),
+        ("account", true, string()),
+        (
+            "status",
+            true,
+            one_of(&["awaitingInstall", "active", "suspended", "revoked"]),
+        ),
+        ("why", false, string()),
+        ("labelSets", true, array(array(string()))),
+        (
+            "runnerGroup",
+            false,
+            result(vec![
+                ("id", true, at_least(0)),
+                ("name", true, string()),
+                ("createdByArca", true, boolean()),
+                ("warning", false, string()),
+            ]),
+        ),
+        (
+            "runners",
+            false,
+            array(result(vec![
+                ("name", true, string()),
+                ("id", true, at_least(0)),
+                ("labels", true, array(string())),
+            ])),
+        ),
+        (
+            "app",
+            false,
+            result(vec![
+                ("id", true, at_least(0)),
+                ("slug", true, string()),
+                ("clientId", true, string()),
+                ("htmlUrl", true, string()),
+                ("ownerId", true, at_least(0)),
+            ]),
+        ),
+        (
+            "installation",
+            false,
+            result(vec![
+                ("id", true, at_least(0)),
+                ("repositorySelection", true, string()),
+                ("repositories", true, array(string())),
+            ]),
+        ),
+        ("createdBy", true, string()),
+        ("createdAt", true, at_least(0)),
+        ("updatedAt", true, at_least(0)),
+    ])
+}
+
+fn github_bindings_result() -> Value {
+    result(vec![
+        ("bindings", true, array(github_binding_record())),
+        ("flows", true, array(github_flow_result())),
+    ])
+}
+
+fn github_audit_params() -> Value {
+    params(vec![
+        ("binding", false, github_binding_schema()),
+        (
+            "limit",
+            false,
+            json!({ "description": "At most this many lines, the newest. Default 100.", "maximum": 1000, "minimum": 1, "type": "integer" }),
+        ),
+    ])
+}
+
+fn github_audit_result() -> Value {
+    result(vec![(
+        "lines",
+        true,
+        array(json!({ "type": "object", "properties": { "at": { "type": "integer" }, "atText": { "type": "string" }, "kind": { "type": "string" } }, "required": ["at", "atText", "kind"] })),
+    )])
+}
 
 /// The checks of every `instance_move_preflight` row, in the order each row lists them.
 pub const MOVE_PREFLIGHT_CHECKS: [&str; 8] = [
@@ -2131,9 +2530,10 @@ fn not_confirmed(name: &str) -> String {
         "deploy_rollback" => "nothing was rolled back",
         "deploy_remove" => "nothing was removed",
         "function_remove" => "nothing was removed",
+        "github_disconnect" => "nothing was disconnected",
         _ => "nothing was deleted",
     };
-    let spent = if name == "postgres_delete" || name == "deploy_rollback" {
+    let spent = if matches!(name, "postgres_delete" | "deploy_rollback" | "github_disconnect") {
         ""
     } else {
         " and no approval was spent"
