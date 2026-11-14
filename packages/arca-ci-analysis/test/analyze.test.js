@@ -114,6 +114,27 @@ test('a job without timeout-minutes gets one of three times its p95', () => {
   assert.deepEqual(finding.change.jobs, [{ id: 'build', minutes: 25 }]);
 });
 
+test('short jobs on a billed runner move to the free runner of a public repository, or to the owner\'s pool', () => {
+  const runs = [];
+  const jobs = [];
+  for (let k = 0; k < 3; k += 1) {
+    const r = run({ sha: `b${k}`, at: k * 100, until: k * 100 + 1 });
+    runs.push(r);
+    jobs.push({ ...job(r, { start: k * 100, end: k * 100 + 1 }), labels: ['blacksmith-4vcpu-ubuntu-2404'] });
+  }
+  const data = dataset(runs, jobs);
+  data.workflows['.github/workflows/ci.yml'] = WORKFLOW.replace('runs-on: ubuntu-latest', 'runs-on: blacksmith-4vcpu-ubuntu-2404');
+  assert.equal(analyze(data).findings.find((f) => f.kind === 'paid-runner'), undefined, 'a private repository has no free runner');
+  data.visibility = 'public';
+  const free = analyze(data).findings.find((f) => f.kind === 'paid-runner');
+  assert.deepEqual(free.change.jobs, [{ id: 'build', from: 'blacksmith-4vcpu-ubuntu-2404', to: 'ubuntu-latest' }]);
+  assert.equal(free.weekly.usd, 0.02);
+  data.visibility = 'private';
+  const pool = analyze(data, { moveTo: 'acme-4vcpu-ubuntu-2404' }).findings.find((f) => f.kind === 'paid-runner');
+  assert.equal(pool.change.jobs[0].to, 'acme-4vcpu-ubuntu-2404');
+  assert.match(pool.evidence[0], /^acme-4vcpu-ubuntu-2404 is the owner's own runner pool/);
+});
+
 test('the report renders, and the result line stays under 4096 bytes', () => {
   const r = run({ sha: 'aaa' });
   const report = analyze(dataset([r], [job(r)]));

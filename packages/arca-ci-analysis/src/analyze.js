@@ -19,7 +19,12 @@ const seconds = (from, to) => (from && to ? Math.max(0, (Date.parse(to) - Date.p
 const round = (n, digits = 0) => (n == null ? null : Math.round(n * 10 ** digits) / 10 ** digits);
 const sum = (values) => values.reduce((a, b) => a + (b ?? 0), 0);
 
-export function analyze(data) {
+/**
+ * @param {object} data a dataset (collect.js)
+ * @param {object} [options]
+ * @param {string} [options.moveTo] the runs-on label of the owner's own runner pool, where short billed jobs move
+ */
+export function analyze(data, options = {}) {
   const scale = 7 / (data.window.days || 7);
   const workflows = Object.fromEntries(
     Object.entries(data.workflows ?? {}).map(([path, text]) => [path, readWorkflow(path, text)]),
@@ -121,7 +126,7 @@ export function analyze(data) {
   const tests = testTimes(jobs, data.logs ?? {});
   const cache = cacheStats(jobs, data.logs ?? {}, data.caches ?? {});
 
-  const context = { data, scale, workflows, jobs, runsById, jobRows, workflowRows, runners, flaky, tests, cache };
+  const context = { data, scale, workflows, jobs, runsById, jobRows, workflowRows, runners, flaky, tests, cache, moveTo: options.moveTo ?? null };
   const findings = [
     ...failingWorkflows(context),
     ...paidRunners(context),
@@ -405,9 +410,17 @@ function failingWorkflows({ data, scale, workflowRows, jobs }) {
   return out;
 }
 
-/** In a public repository, short jobs on a billed runner that a free GitHub-hosted runner would run as well. */
-function paidRunners({ data, scale, workflows, jobRows }) {
-  if (data.visibility !== 'public') return [];
+/**
+ * Short jobs on a billed runner that an unbilled one would run as well: the free GitHub-hosted runner of a public
+ * repository, or, when `moveTo` names one, the label of the repository owner's own runner pool (whatever the
+ * repository's visibility).
+ */
+function paidRunners({ data, scale, workflows, jobRows, moveTo }) {
+  if (!moveTo && data.visibility !== 'public') return [];
+  const target = moveTo ?? 'ubuntu-latest';
+  const why = moveTo
+    ? `${moveTo} is the owner's own runner pool, billed by neither GitHub nor a provider`
+    : 'this repository is public, so ubuntu-latest (4 vCPU for public repositories) is not billed';
   const out = [];
   for (const [path, workflow] of Object.entries(workflows)) {
     if (!workflow) continue;
@@ -423,16 +436,16 @@ function paidRunners({ data, scale, workflows, jobRows }) {
       if (usd <= 0) continue;
       const linux = /ubuntu|linux/.test(job.runsOn) && !/arm/.test(job.runsOn);
       if (!linux) continue;
-      moves.push({ id: job.id, from: job.runsOn, to: 'ubuntu-latest', p50, p95, runs: sum(rows.map((row) => row.runs)), usd });
+      moves.push({ id: job.id, from: job.runsOn, to: target, p50, p95, runs: sum(rows.map((row) => row.runs)), usd });
     }
     if (moves.length === 0) continue;
     const usd = sum(moves.map((move) => move.usd));
     out.push({
       kind: 'paid-runner',
-      title: `Run ${moves.length} short job(s) of ${workflow.name ?? path} on the free GitHub runner`,
+      title: `Run ${moves.length} short job(s) of ${workflow.name ?? path} on ${moveTo ? moveTo : 'the free GitHub runner'}`,
       path,
       evidence: [
-        `this repository is public, so ubuntu-latest (4 vCPU for public repositories) is not billed; these jobs run on ${[...new Set(moves.map((m) => m.from))].join(', ')} and cost $${round(usd, 2)} in ${data.window.days} days`,
+        `${why}; these jobs run on ${[...new Set(moves.map((m) => m.from))].join(', ')} and cost $${round(usd, 2)} in ${data.window.days} days`,
         ...moves.map((m) => `${m.id}: p50 ${minutesText(m.p50)}, p95 ${minutesText(m.p95)} over ${m.runs} runs, $${round(m.usd, 2)}`),
         'a short job gains little from a faster runner; a job that needs the provider\'s own cache or hardware should stay',
       ],
@@ -440,7 +453,7 @@ function paidRunners({ data, scale, workflows, jobRows }) {
       confidence: 'measured',
       mechanical: true,
       change: { kind: 'set-runner', path, jobs: moves.map((m) => ({ id: m.id, from: m.from, to: m.to })) },
-      suggestion: `Set runs-on: ubuntu-latest for ${moves.map((m) => m.id).join(', ')}.`,
+      suggestion: `Set runs-on: ${target} for ${moves.map((m) => m.id).join(', ')}.`,
     });
   }
   return out;

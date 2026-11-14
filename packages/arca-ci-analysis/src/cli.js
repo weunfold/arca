@@ -8,7 +8,8 @@
 //   GITHUB_TOKEN                               a token that can read the repositories, or
 //   GITHUB_APP_ID and GITHUB_APP_KEY_B64       a GitHub App installed on them (the PEM key, base64 on one line), or
 //   GITHUB_APP_ID and GITHUB_APP_KEY           the same with the PEM key itself
-// REPOS (comma-separated) and DAYS stand for --repo and --days, as an Arca function's plain settings.
+// REPOS (comma-separated), DAYS and MOVE_TO stand for --repo, --days and --move-to, as an Arca function's plain
+// settings. --move-to LABEL names the owner's own runner pool: short jobs on billed runners are proposed to move there.
 //
 // With --out, each repository gets DIR/<owner>__<name>/{dataset.json,report.json,report.md}. Without it (an Arca
 // function run), the Markdown report of each repository is printed, then one JSON result line, the run's result.
@@ -34,6 +35,7 @@ function parseArgs(argv) {
     };
     if (flag === '--repo') args.repos.push(value());
     else if (flag === '--days') args.days = Number(value());
+    else if (flag === '--move-to') args.moveTo = value();
     else if (flag === '--out') args.out = value();
     else if (flag === '--dataset') args.datasets.push(value());
     else if (flag === '--help' || flag === '-h') args.help = true;
@@ -41,6 +43,7 @@ function parseArgs(argv) {
   }
   if (args.repos.length === 0 && process.env.REPOS) args.repos = process.env.REPOS.split(',').map((r) => r.trim()).filter(Boolean);
   if (args.days == null && process.env.DAYS) args.days = Number(process.env.DAYS);
+  if (!args.moveTo && process.env.MOVE_TO) args.moveTo = process.env.MOVE_TO;
   return args;
 }
 
@@ -80,7 +83,7 @@ async function main() {
 
   for (const path of args.datasets) {
     const data = JSON.parse(await readFile(path, 'utf8'));
-    reports.push(await save(args.out, data, analyze(data)));
+    reports.push(await save(args.out, data, analyze(data, { moveTo: args.moveTo })));
   }
   if (args.repos.length) {
     // The repositories are read side by side, through one client that keeps a few requests in flight in all: a
@@ -93,7 +96,7 @@ async function main() {
             days: args.days ?? undefined,
             log: (line) => process.stderr.write(`${line}\n`),
           });
-          return await save(args.out, data, analyze(data));
+          return await save(args.out, data, analyze(data, { moveTo: args.moveTo }));
         } catch (error) {
           errors.push(`${repo}: ${error.message}`);
           return null;

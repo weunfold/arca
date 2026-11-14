@@ -42,6 +42,7 @@ estimates weigh 0.6).
 ```
 GITHUB_TOKEN=... node src/cli.js --repo acme/app --repo acme/lib --out out/
 node src/cli.js --dataset out/acme__app/dataset.json --out out/      # analyse a saved dataset again, offline
+node src/cli.js --repo acme/app --move-to acme-4vcpu-ubuntu-2404 --out out/  # short billed jobs go to your own pool
 node src/pr-cli.js --report out/acme__app/report.json --workdir work/  # draft the top writable finding
 node src/pr-cli.js --report out/acme__app/report.json --workdir work/ --open   # push to a fork, open a DRAFT PR
 ```
