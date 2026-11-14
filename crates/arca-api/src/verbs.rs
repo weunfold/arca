@@ -83,7 +83,7 @@ impl Verb {
     }
 }
 
-static VERBS: [Verb; 68] = [
+static VERBS: [Verb; 69] = [
     Verb {
         name: "arca_status",
         summary: "Node status: the API version, the node id, the mode, the uptime, whether Incus answers and the last applied sequence number.",
@@ -408,7 +408,7 @@ static VERBS: [Verb; 68] = [
     },
     Verb {
         name: "service_update",
-        summary: "Move a running container service made from an image by digest to another digest of that image in one call (or, with follow, say whether the node moves an Automagik server by itself): it is stopped, its root rebuilt from the new digest (data volume, config, secrets and firewall rules are kept), started, and checked within the timeout (120 seconds unless timeoutSeconds says otherwise). On any failure the old version is put back. A service whose template declares a data volume it lacks would lose its data: it is refused before any change, unless eraseData, which needs the owner's approval through action_propose.",
+        summary: "Move a running container service made from an image by digest, or a local image pinned by fingerprint, to another digest or fingerprint in one call (or, with follow, say whether the node moves an Automagik server by itself): it is stopped, its root rebuilt from the new image (data volume, config, secrets and firewall rules are kept), started, and checked within timeoutSeconds (120 by default). On any failure the old version is put back. A local image must already be in the service project's image store. A service whose template declares a data volume it lacks would lose its data: it is refused before any change, unless eraseData, which needs the owner's approval through action_propose.",
         class: VerbClass::L,
         min_scope: Scope::Doctor,
         writes: true,
@@ -903,7 +903,7 @@ static VERBS: [Verb; 68] = [
     },
     Verb {
         name: "function_create",
-        summary: "Create a function: an OCI image by digest that holds one program, run on a timer, each run one start of its own container, on its image's own root, with a time, a memory and a CPU limit. Only from a proposal the owner approved (action_propose), whose card shows the image and digest, the command, the timer, the limits, the names of its secrets and everything it may reach: the services of this node its links name, each on one tcp port, the private addresses this node's config names for it, and nothing else, no public address among them. It is created stopped; function_secret_set sets its secrets, and the timer runs it from then on.",
+        summary: "Create a function: an OCI image by digest that holds one program, run on a timer, each run one start of its own container, on its image's own root, with a time, a memory and a CPU limit. Only from a proposal the owner approved (action_propose), whose card shows the image and digest, the command, the timer, the limits, the names of its secrets and everything it may reach: the services of this node its links name, each on one tcp port, the private addresses this node's config names for it, and the internet only when the definition says internet: true. It is created stopped; function_secret_set sets its secrets, and the timer runs it from then on.",
         class: VerbClass::L,
         min_scope: Scope::Doctor,
         writes: true,
@@ -1041,7 +1041,163 @@ static VERBS: [Verb; 68] = [
         params: host_network_restore_params,
         result: host_network_restore_result,
     },
+    Verb {
+        name: "instance_move_preflight",
+        summary: "Before any move: whether a linked host can take each instance, one go/no-go row per instance in input order. Each row checks the instance's measured size against the target pool's free space less the earlier instances of the call, the storage driver change, the CPU features (all of them for a live move), devices the target lacks, networks and fixed addresses, projects, profiles and ACLs, proxies listening on this host's own address, and macvlan parent names, each ok or the reason it is not with what to do. It only reads: nothing is stopped, copied, created or recorded.",
+        class: VerbClass::L,
+        min_scope: Scope::Viewer,
+        writes: false,
+        destructive: false,
+        untrusted: false,
+        output_key: None,
+        summary_text: summary_move_preflight,
+        cut: no_cut,
+        params: instance_move_preflight_params,
+        result: instance_move_preflight_result,
+    },
 ];
+
+/// The checks of every `instance_move_preflight` row, in the order each row lists them.
+pub const MOVE_PREFLIGHT_CHECKS: [&str; 8] = [
+    "size",
+    "storageDriver",
+    "cpu",
+    "devices",
+    "networks",
+    "projectsProfilesAcls",
+    "proxyListen",
+    "macvlanParents",
+];
+
+fn instance_move_preflight_params() -> Value {
+    let reference = params(vec![
+        (
+            "project",
+            true,
+            json!({
+                "description": "The Incus project the instance is in, on this node.",
+                "maxLength": 63,
+                "minLength": 1,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$",
+                "type": "string"
+            }),
+        ),
+        ("name", true, instance_name_schema()),
+    ]);
+    params(vec![
+        (
+            "instances",
+            true,
+            json!({
+                "description": "The instances to check, in the order the rows answer them: 1 to 50 references. One instance is a list of one. An earlier instance whose size fits counts as already destined for the target when a later one is sized.",
+                "items": reference,
+                "maxItems": 50,
+                "type": "array"
+            }),
+        ),
+        (
+            "target",
+            true,
+            json!({
+                "description": "The target node: the name of one of this kernel's linked hosts (approval.linkedHosts). Its facts are read through that host's incusSocket.",
+                "maxLength": 253,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$",
+                "type": "string"
+            }),
+        ),
+        (
+            "live",
+            false,
+            json!({
+                "description": "Check for a live (stateful) move: the target's CPU must then have every CPU feature of this host. Absent or false, a cold move, where a missing feature is a risk and not a blocker.",
+                "type": "boolean"
+            }),
+        ),
+    ])
+}
+
+fn instance_move_preflight_result() -> Value {
+    let finding = result(vec![
+        ("subject", true, string()),
+        ("ok", true, boolean()),
+        ("detail", true, string()),
+        ("proposal", true, nullable(string())),
+    ]);
+    let measure = result(vec![
+        ("method", true, nullable_enum(&["walked"])),
+        ("path", true, nullable(string())),
+        ("instanceBytes", true, nullable(int())),
+        ("snapshotBytes", true, nullable(int())),
+        ("volumeBytes", true, nullable(int())),
+        ("hostFolderBytes", true, nullable(int())),
+        ("notMeasured", true, nullable(string())),
+        ("measuredBytes", true, nullable(int())),
+        ("headroomBytes", true, nullable(int())),
+        ("neededBytes", true, nullable(int())),
+        ("neededWithoutSnapshotsBytes", false, nullable(int())),
+        ("fitsWithoutSnapshots", false, nullable(boolean())),
+        ("sourcePool", true, nullable(string())),
+        ("targetPool", true, nullable(string())),
+        ("targetFreeBytes", true, nullable(int())),
+        ("pendingBytes", true, int()),
+        ("pendingFor", true, array(string())),
+        ("availableBytes", true, nullable(int())),
+    ]);
+    let check = result(vec![
+        ("check", true, one_of(&MOVE_PREFLIGHT_CHECKS)),
+        ("ok", true, boolean()),
+        ("detail", true, string()),
+        ("findings", true, array(finding)),
+        ("risks", true, array(string())),
+        ("measure", false, measure),
+        ("sourceDriver", false, nullable(string())),
+        ("targetDriver", false, nullable(string())),
+        ("crossesDriver", false, nullable(boolean())),
+        ("live", false, boolean()),
+        ("missingFeatures", false, array(string())),
+        ("sourceBaseline", false, nullable(string())),
+        ("targetBaseline", false, nullable(string())),
+    ]);
+    let row = result(vec![
+        ("project", true, string()),
+        ("name", true, string()),
+        ("target", true, string()),
+        ("go", true, boolean()),
+        ("reason", true, nullable(string())),
+        ("checks", true, array(check)),
+    ]);
+    result(vec![
+        (
+            "target",
+            true,
+            result(vec![
+                ("name", true, string()),
+                ("reachable", true, boolean()),
+                ("reason", true, nullable(string())),
+            ]),
+        ),
+        ("live", true, boolean()),
+        ("rows", true, array(row)),
+    ])
+}
+
+/// A short line for a successful `instance_move_preflight`.
+pub fn summary_move_preflight(v: &Value) -> String {
+    let rows = v["rows"].as_array().map_or(&[][..], Vec::as_slice);
+    let go = rows.iter().filter(|row| row["go"] == true).count();
+    let target = v["target"]["name"].as_str().unwrap_or("?");
+    let unread = if v["target"]["reachable"] == false {
+        " (the target could not be read)"
+    } else {
+        ""
+    };
+    format!(
+        "{} instance(s) to {target}: {go} go, {} no-go{unread}",
+        rows.len(),
+        rows.len() - go
+    )
+}
 
 fn host_network_restore_params() -> Value {
     params(vec![("approval", true, approval_schema())])
@@ -1265,6 +1421,10 @@ fn function_create_params_base() -> Value {
                 "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$", "type": "string" },
                 "type": "object"
             },
+            "internet": {
+                "description": "Whether the function may reach the internet: true lets its runs open connections to every public address, as a service can, and the owner's card says so. Left out or false, it opens no connection to a public address. The node's services stay closed to it but for its links either way.",
+                "type": "boolean"
+            },
             "image": {
                 "description": "The image, as <registry>/<repository> in lower case, such as registry.example/acme/relay. Arca pulls it without a credential.",
                 "maxLength": 255,
@@ -1319,6 +1479,7 @@ fn function_result() -> Value {
             ])),
         ),
         ("destinations", false, json!({ "type": "array" })),
+        ("internet", true, boolean()),
         ("triggers", true, json!({ "type": "array" })),
         ("limits", true, json!({ "type": "object" })),
         ("concurrency", true, bounded_int(1, 1)),
@@ -3851,7 +4012,7 @@ pub fn summary_service_update(v: &Value) -> String {
     if v.get("follow").is_some() {
         "Service's follow setting changed.".to_string()
     } else if v["updated"] == false {
-        "Service already on that digest.".to_string()
+        "Service already runs that image.".to_string()
     } else if v.get("noNewPrivileges").is_some() {
         "Service's no-new-privileges setting changed.".to_string()
     } else {
@@ -3874,7 +4035,7 @@ fn service_update_params_base() -> Value {
                 "type": "string"
             },
             "digest": {
-                "description": "The image digest to move to: sha256: and 64 lower-case hex digits. The service keeps its image's repository. Give it, or follow, not both.",
+                "description": "The image to move to: sha256: and 64 lower-case hex digits. For an OCI image, the digest, and the service keeps its image's repository; for a service made from a local image pinned by fingerprint, the new image's fingerprint. Give it, or follow, not both.",
                 "pattern": "^sha256:[0-9a-f]{64}$",
                 "type": "string"
             },

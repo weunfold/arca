@@ -6897,6 +6897,7 @@ impl ServiceHandler {
                 "secrets",
                 "links",
                 "destinations",
+                "internet",
                 "triggers",
                 "limits",
                 "concurrency",

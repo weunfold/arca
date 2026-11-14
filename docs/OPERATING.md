@@ -186,7 +186,7 @@ refused without the value being echoed back.
 | `canvasOrigin` | no | The loopback DSH origin the remote canvas proxies: an `http://` literal loopback IP and port, with no path. Default `http://127.0.0.1:3081`; any other origin refuses the config before `serve` listens. |
 | `approval.trustOwnerKeysFrom` | no | Absolute paths of other kernels' owner passkeys files on this machine, which this kernel also trusts, read-only, for action approvals only (never to change its own passkeys). See "Approving on another kernel of this machine". |
 | `approval.origins` | with `trustOwnerKeysFrom` | The page origins (`approvalOrigin` form) a passkey from those files may answer from. A line for any other origin is not trusted. |
-| `approval.linkedHosts` | no | `[{ "name": "<host>", "socket": "<path>", "tokenFile": "<path>" }]`: the kernels on this machine whose proposals this kernel's approval page lists and relays approvals to. |
+| `approval.linkedHosts` | no | `[{ "name": "<host>", "socket": "<path>", "tokenFile": "<path>", "incusSocket": "<path>" }]`: the kernels on this machine whose proposals this kernel's approval page lists and relays approvals to. The optional `incusSocket` is that host's Incus socket on this machine (local, or forwarded to a path here); `instance_move_preflight` reads the host through it, with GETs only. |
 
 The config is refused, with exit 2, when:
 
@@ -864,9 +864,17 @@ upgrade, as any shipped template nobody edited. A service made before keeps runn
 is its own instance, and the upgrade does not touch it. Its `service_status` shows the newer release under `update`
 (`"state": "differs"`, the new digest as `templatePin`). A new service pulls 3.136.4.
 
-Keep a running service on the release it has: Arca has no way yet to move one to its template's version in place.
-The only way today is a `service_remove` and a `service_create`, and the remove deletes the service's data, which
-Arca cannot put back into the new service:
+Keep a running service on the release it has, unless you move it yourself: Arca does not move one to its template's
+version by itself. A container moves in place with `service_update {name, digest}`: to the digest an OCI template now
+names, or, for a service made from a local image pinned by fingerprint, to that image's fingerprint, which must
+already be in the service project's image store. An update in place needs an image pinned by digest or fingerprint, a
+template port for the health check, and the service's data on a declared volume (a template `data` path): the rebuild
+replaces the root, so whatever the service keeps there is gone, and a service whose template declares a volume it does
+not have is refused. A service that keeps data on its root, whose image is not pinned, or whose template declares no
+port, is not updatable in place: copy the data out, or create a new service. Keep the old image in the store until the
+update has succeeded, since a rollback in a project without snapshots rebuilds the old root from it. A virtual machine
+has no update path: the way is a `service_remove` and a `service_create`, and the remove deletes the service's data,
+which Arca cannot put back into the new service:
 
 - The server's `/data` is its own volume, `<name>-data`, which `service_remove` deletes with the instance. A snapshot
   of the instance leaves that volume out; it needs its own: `snapshot_create` with `{project: "arcak-svc", volume:
@@ -1576,17 +1584,19 @@ record is refused.
 ### Updating a service to a new image digest
 
 `service_update` takes `{name, digest, timeoutSeconds?, eraseData?, tenant?}` (or `{name, follow}`, see below) and
-moves a running container service made from an image by digest (today `automagik-server`) to another digest of the
-same image in one call. It is a destructive verb (it takes the optional `confirm`), needs a `doctor` token and asks
-the owner for nothing, except for `eraseData` (see below); it works inside a tenant as outside one. There is no
-update path for `automagik-workspace` yet: it is a virtual machine, whose Docker pulls its own server image, and the
-verb refuses it. In order, each step a line in `service-updates.jsonl` in the
+moves a running container service made from an image by digest (today `automagik-server`) or from a local image
+pinned by fingerprint (a template's `local:<alias>` beside a `digest`, see "A local image may be pinned") to another
+digest, or fingerprint, in one call. It is a destructive verb (it takes the optional `confirm`), needs a `doctor`
+token and asks the owner for nothing, except for `eraseData` (see below); it works inside a tenant as outside one.
+There is no update path for `automagik-workspace` yet: it is a virtual machine, whose Docker pulls its own server
+image, and the verb refuses it. In order, each step a line in `service-updates.jsonl` in the
 state directory (an append-only file of JSON lines: a `begin`, one line per step, an `end`; never a secret):
 
 1. the instance is stopped, if it runs, and a snapshot of it, `pre-update-<time>`, is taken where the project allows
    one. No project Arca makes does (each is restricted, and Incus answers that it does not allow snapshot creation),
    so on a node as Arca makes it there is no snapshot, and the answer's `snapshot` is `null`;
-2. its root is rebuilt from `<repository>@<digest>`; Incus may take up to 10 minutes to fetch the image. Incus keeps
+2. its root is rebuilt from `<repository>@<digest>`, or, for a local pinned image, from the project's own copy of the
+   image whose fingerprint is `digest`; Incus may take up to 10 minutes to fetch an OCI image. Incus keeps
    what is not the root: the config, the secrets, the firewall rules and the data volume (a template's `data`
    path, `/data` for `automagik-server`). Whatever the old version wrote to its own root is gone, so **an update of a
    service that keeps its data on its root disk is refused** (see "A service that keeps its data inside the
@@ -1608,10 +1618,25 @@ the old version is started as it is, and the refusal says so. If Incus does not 
 rolled back, so as not to rebuild twice at once: the refusal is `update_unsettled`, and the same update may be asked
 for again once Incus is idle. If the old version cannot be put back, the refusal is `rollback_failed`, says so, and
 leaves the service stopped. A failure before anything is changed (the digest is malformed, the service is not made
-from an image by digest, its instance is not the one Arca created, it has never been started, the snapshot failed for
+from an image by digest or a local image pinned by fingerprint, the image a local update names is not in the service
+project's image store, its instance is not the one Arca created, it has never been started, the snapshot failed for
 a reason other than the project not allowing one) says "Nothing was changed". A call for the digest the service
 already runs changes nothing and answers `updated: false`. A service being updated refuses a second update until
 the first ends. The call is synchronous and can take several minutes: the journal keeps what it did.
+
+A local image is moved by fingerprint: the call's `digest` is the new image's fingerprint (`sha256:` and 64 lower-case
+hex digits, as Incus writes it), and the image must be in the service project's own image store before anything is
+changed. The node reads that store first and refuses, before it stops the service and with "Nothing was changed", when
+no image there has that fingerprint, saying how to put it there (`incus image copy <image> local: --alias <alias>
+--project arcak-svc`, or a build in that project). `action_propose` does not read the image store: a card made before
+the image is put there can be approved, and its run is then refused before anything is changed. The record's alias
+becomes the installed template's alias when that template pins the same fingerprint, and stays what it was otherwise;
+the fingerprint decides which image Incus uses. **Keep the old image in the store until the update has succeeded**: a
+rollback in a project that allows no snapshot rebuilds the old root from the old fingerprint. If that image is gone, a
+rollback after a failed start or health check answers `rollback_failed`; after a failed new rebuild the old root was
+never taken away, so the answer is `rolled_back` with the old root kept. A project that allows snapshots restores the
+snapshot instead, and the record still names the old image either way. The update rebuilds from the project's own copy,
+never from an alias alone; a rebuild from an image the store no longer holds fails before it takes the old root away.
 
 #### A service that keeps its data inside the container
 
@@ -1797,7 +1822,7 @@ unix socket. The verbs
 in this build are `arca_status`, `node_metrics`, `watch_report`, `alerts_list`, `token_list`, `journal_list`, `plan_list`,
 `action_propose`, `plan_decline`, `approval_submit`, `action_approve`, `peer_keys_sync`, the Postgres and ontology verbs, `service_create`, `service_list` and
 `service_status`, `gpu_attach` and `gpu_detach`, `storage_list`, `storage_add`, `snapshot_create`, `snapshot_list` and
-`snapshot_delete`, and `instance_start`, `instance_stop` and `instance_restart`.
+`snapshot_delete`, `instance_start`, `instance_stop` and `instance_restart`, and `instance_move_preflight`.
 
 The unix socket serves only a peer whose credentials carry the server's own uid. Any other peer is closed before a byte of
 its request is read.
@@ -2170,6 +2195,72 @@ with `"secrets":null`: it names the secrets and never holds a value or a reason 
 The `begin` line is durable before anything is sent to Incus:
 when it cannot be written (the file is a link, or is not mode 0600) the call is refused with `InstanceJournalUnavailable`
 and nothing changes. A file past 8 MiB is set aside as `instance-actions.jsonl.1`, replacing the one set aside before.
+
+## Before moving an instance: `instance_move_preflight`
+
+`instance_move_preflight` (viewer) answers, before anything is moved, whether a target node can take each instance and
+what to fix first. It changes nothing: it sends only GETs, to this node's Incus and to the target's, and walks the
+instance's storage folder on this host to measure it. Nothing is stopped, started, copied or created, no proposal is
+recorded, and no journal or state file is written. Every finding is a check in the instance's row; the verb itself
+refuses only arguments it cannot read.
+
+It takes `instances`, a list of 1 to 50 `{project, name}` references on this node (one instance is a list of one), the
+`target`, and an optional `live` (default `false`). The target is one of this kernel's linked hosts
+(`approval.linkedHosts`), named as the config names it, whose `incusSocket` is that host's Incus socket here. A target
+with no such linked host, with no `incusSocket`, or whose Incus does not answer is not a refusal: `target.reachable` is
+`false`, `target.reason` says why, and every row is no-go with that reason.
+
+The answer has one row per instance, in the order asked: its `project`, `name` and `target`, `go`, a `reason` when it is
+no-go, and eight `checks`, always all eight and always in this order. Each check is `ok` or not, with a `detail` an
+operator can act on, `findings` (each with its `subject`, `ok`, `detail` and a `proposal`), and `risks` that do not
+block the move by themselves. `go` is true only when every check is ok.
+
+| Check | What it reads | Not ok when |
+|-------|---------------|-------------|
+| `size` | Everything that lands on the target pool, measured on this host by walking it: the instance's own folder (`<incus dir>/storage-pools/<pool>/containers/<project>_<name>`, or `virtual-machines/`), its snapshots (each counted in full, so the need is an upper bound), each custom volume it mounts that is not on the target yet and lands on the same pool (Incus keeps it at `custom/<project>_<name>`, `default_<name>` when the instance's project does not set `features.storage.volumes`), and each host folder it mounts. A file counts at its size or its blocks, whichever is larger, and a file with several links once. On btrfs and dir the folders are always there; on zfs, lvm and ceph a container's volume is walked only while Incus has it mounted, and a virtual machine's disk there is a block volume that is not walked. Incus's own usage figure is never used: it leaves out data shared with a snapshot or an image clone. It adds 10% headroom and compares that with the target pool's free space less every earlier instance of the same call that fits there. `measure` holds every number, part by part. | The need is larger than what is left, or the free space cannot be read. The row also gives the need without the snapshots (`neededWithoutSnapshotsBytes`, `fitsWithoutSnapshots`) and says "fits without snapshots" when only that one fits. When anything cannot be walked (an unmounted or block volume, an unknown driver, a folder the kernel's user cannot read) the size is not measured: not ok, with `measure.notMeasured` and the detail giving the reason. |
+| `storageDriver` | The driver of the instance's pool here and of the target pool (the pool of the same name, else the one the target's default profile names). | The target has no such pool. A move across drivers is ok, with `crossesDriver: true` and the risk said: Incus copies the files one by one instead of sending a btrfs or zfs stream. |
+| `cpu` | Both hosts' CPU features (`/1.0/resources`), their x86-64 levels, and whether the target runs the instance's architecture. | The target does not run the architecture; or, with `live: true`, it lacks any CPU feature of this host (`missingFeatures` names them). On a cold move a missing feature is a risk: programs built for this host's CPU may use it. |
+| `devices` | Each GPU, GPU node (`/dev/dri/...`), other `unix-char` or `unix-block` device, USB and PCI device, custom volume and host folder disk. | The target lacks it. A host device Incus does not list cannot be confirmed and is not ok unless the device says `required=false`. A host folder disk is always not ok: its data stays here, and the proposal names a custom volume on the target to copy it into. |
+| `networks` | Each network card's network or parent, and its fixed address. | The target has no such network (the proposal names the same subnet as here), the fixed address is outside the target network's subnet, or another card holds it there. |
+| `projectsProfilesAcls` | The project and its `features.*`, each profile, and each ACL the cards or their networks name. | One is missing on the target or differs from here; each is named. |
+| `proxyListen` | Each proxy device's listen address. | It listens on an address of this host that the target does not hold; the proposal names the target's own addresses. Every-address and loopback listens move as they are. |
+| `macvlanParents` | Each macvlan card's parent interface, matched against the target's own interface names. | The target has no interface of that name. On IncusOS the bridge carries the network card's name and a `_p...` port is not a parent, so the proposal lists the target's own names. |
+
+To measure, the kernel's user needs read access to the Incus storage folders (`/var/lib/incus/storage-pools` and
+below) and to every host folder an instance mounts. On a standard host those are `root:root` with mode 0711, so a kernel
+that runs as an ordinary user cannot list them: its `size` check says "not measured" with the permission error and the
+path, and every other check still answers. Give the kernel's user read access there (for example through an ACL), or
+read the size from a kernel that can.
+
+A worked example. `node-a` holds the container `web` in the project `shop`, 4.0 GiB on a btrfs pool, with a fixed address
+on `arcabr0` and a proxy on `node-a`'s own address. Its config links `node-b`:
+
+```json
+"approval": { "linkedHosts": [ { "name": "node-b", "socket": "/run/arca-node-b/arca.sock",
+  "tokenFile": "/etc/arca/node-b-relay.secret", "incusSocket": "/run/arca-node-b/incus.sock" } ] }
+```
+
+```
+arca call instance_move_preflight '{"instances":[{"project":"shop","name":"web"}],"target":"node-b"}'
+```
+
+```json
+{ "target": { "name": "node-b", "reachable": true, "reason": null }, "live": false,
+  "rows": [ { "project": "shop", "name": "web", "target": "node-b", "go": false, "reason": "not ok: proxyListen",
+    "checks": [
+      { "check": "size", "ok": true, "detail": "measured 4.0 GiB (4294967296 bytes) by walking the instance 4.0 GiB at /var/lib/incus/storage-pools/default/containers/shop_web; with 10% headroom it needs 4.4 GiB. node-b's pool default has 120.0 GiB free, minus 0 B pending for earlier moves to it = 120.0 GiB available: it fits", "findings": [], "risks": [],
+        "measure": { "method": "walked", "measuredBytes": 4294967296, "headroomBytes": 429496729, "neededBytes": 4724464025, "targetFreeBytes": 128849018880, "pendingBytes": 0, "availableBytes": 128849018880, "...": "..." } },
+      { "check": "proxyListen", "ok": false, "detail": "not ok: https", "risks": [],
+        "findings": [ { "subject": "https", "ok": false,
+          "detail": "the proxy https listens on 203.0.113.10 port 443, an address of this host (enp6s0) that node-b does not have; on node-b it would not listen",
+          "proposal": "re-point https's listen to one of node-b's own addresses: 203.0.113.20 (br-lan), or to 0.0.0.0 for every address" } ] },
+      "... the other six checks, each ok ..."
+    ] } ] }
+```
+
+The operator re-points the proxy, then asks again; `go` turns true. Several instances in one call are sized one after
+another against the same pool: an earlier one that fits counts as pending for the later ones, and its name is in their
+`detail` and in `measure.pendingFor`.
 
 ## Snapshot storage and snapshots
 
@@ -4448,9 +4539,10 @@ install --replace` from a newer release. `service_status` answers both under `up
 key on any other row. Both are read from this node's own records and files: no registry is asked and nothing is
 written. Two digests carry no order, so `differs` never says which version is the newer one. A service made from a
 system image by an alias has no version of this kind and carries no `update` (`baseImage`, above, is what it has),
-and neither does an adopted instance. For a container made from an image by digest, `service_update` moves it to another digest (see "Updating a service
-to a new image digest"); for a virtual machine the only way is `service_remove` and `service_create`. This only tells you that
-there is one.
+and neither does an adopted instance. For a container made from an image by digest or a local image pinned by
+fingerprint, `service_update` moves it to another digest, or fingerprint (see "Updating a service to a new image
+digest"); for a virtual machine the only way is `service_remove` and `service_create`. This only tells you that there
+is one.
 
 A virtual-machine template says where its version is with one key:
 
@@ -5494,7 +5586,7 @@ A kernel-mode node with the managed service network (`kernel.serviceCidr`) runs 
 
 | Verb | Who runs it | What it does |
 |------|-------------|--------------|
-| `function_create {name, image, digest, triggers, command?, env?, secrets?, links?, limits?}` | only an approved action proposal | Creates the function, stopped. Its timer runs it from then on. |
+| `function_create {name, image, digest, triggers, command?, env?, secrets?, links?, internet?, limits?}` | only an approved action proposal | Creates the function, stopped. Its timer runs it from then on. |
 | `function_remove {name}` | only an approved action proposal | Stops the run that is going, deletes the function with its secrets. Its lines in the run log are kept. |
 | `function_secret_set {name, key, value}` | a `doctor` token | Sets one of the secrets the definition names. Write-only. |
 | `function_list` | a `viewer` token | Every function, with its definition, which secrets are set, whether a run is going, and its newest run. |
@@ -5530,6 +5622,7 @@ action_propose { "action": "function_create", "args": {
 | `env` | Plain values by name, at most 32, each at most 160 characters. The card shows each whole. |
 | `secrets` | Names only, at most 16. See below. |
 | `links` | Services of this node the function may reach, each on one tcp port that service declares. At most 8. |
+| `internet` | Optional, `true` or `false` (the default). `true` lets its runs open connections to every public address, as a service can; see below. |
 | `triggers` | Exactly one, a timer: `everySeconds` from 10 to 86400. |
 | `limits` | `seconds` 1 to 900 (default 60), `memory` a size of at least 8MiB (default 128MiB), `cpu` 1 to 64 (default 1). |
 
@@ -5550,8 +5643,13 @@ and a default that rejects both ways:
 - a **private address** outside the node's services is opened exactly as a service's is: the node's config names it for
   the function's name (`kernel.serviceDestinations`), the proposal fills it in, and the card's `Private network` row
   shows it ([A service that may reach one private address](#a-service-that-may-reach-one-private-address));
-- **nothing else.** A service's rules end with one that lets everything else out to the internet. A function's do not:
-  it can open no connection to a public address. There is no setting for it in this build.
+- the **internet**, only when the definition says `"internet": true`. The rules then end with one allow of every
+  address outside the service network. The rejects before it are a service's: every private range, the node's own
+  addresses, and every service of this node but the linked ones stay closed. The card's `Internet` row says `Yes` and
+  that a run can send there whatever its program and its secrets hold. It is for a program whose work is a public API
+  (the CI analysis reads `api.github.com`): its host names change their addresses, so no rule can name them one by one;
+- **nothing else.** Without `internet`, a function's rules have no rule that lets everything else out: it can open no
+  connection to a public address.
 
 **One way out stays open, and the card says so.** The service network's own DNS answers a function, as it answers
 every instance there, and it asks the internet's name servers for a name it does not know. So a program can still
