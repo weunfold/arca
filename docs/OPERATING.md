@@ -5008,7 +5008,7 @@ since it is where the pool's credential will be used.
 | `runnerGroupId` | yes | The number of the runner group the runners join (step 1). Not used for a repository. |
 | `classes` | yes | The label sets, each with its slot size: `name` (a-z, 0-9), `labels` (what a job's `runs-on` asks for), `cpu`, `memory` and `slots` (how many runners of this class the pool keeps). Given at create, it replaces the whole list. Each class is checked like the template's first: whole numbers for `cpu` and `slots`, and a `memory` above zero and at most the machine's. The card shows one row a class. |
 | `maxSlots` | yes | The cap: never more than this many slots at once, whatever the classes add up to. Never below the number of classes: a create with less is refused ("A place for every class" below). |
-| `aptPackages` | yes | The Ubuntu packages added to the runner image, which the machine builds once ("The runner image's packages" below). The default is `["libatomic1", "build-essential"]`. Given at create, it replaces the whole list, so name the defaults too when you add one; `[]` runs the runner image as it is. |
+| `aptPackages` | yes | The Ubuntu packages added to the runner image, which the machine builds once ("The runner image's packages" below). The default is `["libatomic1", "build-essential", "zstd", "wget", "skopeo"]`. Given at create, it replaces the whole list, so name the defaults too when you add one; `[]` runs the runner image as it is. |
 | `allowDefaultRunnerGroup` | no | `true` lets the pool start on the organisation's default runner group. Leave it out. |
 | `reserveMemory` | no | Memory kept back for the virtual machine itself. The slots share what is left. |
 | `dockerCache`, `dependencyCache` | no | The disk the Docker layer caches and the dependency caches may use, over all slots. |
@@ -5197,10 +5197,12 @@ neither has been measured on the pool itself.
   registration and a new container, so no job finds another's files, processes or installed packages.
 - **The runner image's packages.** The runner's public image is Ubuntu 24.04 with git, curl, jq, unzip, python3,
   Docker's client and a passwordless `sudo`, and less than GitHub's own `ubuntu-latest`: no C compiler, no `make`, no
-  `libatomic1` (pnpm and other Node.js-based tools stop with `libatomic.so.1` missing). So before it begins any slot
-  the controller builds one image on the machine: `FROM` the pinned runner image, then `apt-get install
-  --no-install-recommends` of `aptPackages` (by default `libatomic1` and `build-essential`, which is `make`, `gcc`
-  and `g++`). It is named `arca-runner-pool-<the pool's id>:<a digest of what it is built from>`, kept on the
+  `libatomic1` (pnpm and other Node.js-based tools stop with `libatomic.so.1` missing), no `zstd` (`actions/cache`
+  then falls back to gzip, which is another cache version, so no cache saved with zstd restores), no `wget` and no
+  `skopeo`. So before it begins any slot the controller builds one image on the machine: `FROM` the pinned runner
+  image, then `apt-get install --no-install-recommends` of `aptPackages` (by default `libatomic1`, `build-essential`,
+  which is `make`, `gcc` and `g++`, `zstd`, `wget` and `skopeo`, all from Ubuntu's own archive, `skopeo` from its
+  universe component). It is named `arca-runner-pool-<the pool's id>:<a digest of what it is built from>`, kept on the
   machine's disk, and every runner starts from it; a controller that finds it built builds nothing. Node.js is not in
   the list: a workflow sets up the version it wants with `actions/setup-node`, and the runner carries its own for
   JavaScript actions. A build that fails (a mirror that cannot be reached, a name that is not a package) is said in

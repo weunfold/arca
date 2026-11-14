@@ -8,8 +8,10 @@ What changed in each release of Automagik Arca, in plain words. The newest relea
 Write under this comment only what a reader needs beyond those lines; the release puts its heading above it. -->
 
 The `github-runner-pool` controller builds one runner image on its machine before it begins any slot: the pinned
-runner image with the Ubuntu packages of a new setting, `aptPackages` (by default `libatomic1` and `build-essential`,
-which GitHub's `ubuntu-latest` has and the runner image lacks; settable at create), and every runner starts from it.
+runner image with the Ubuntu packages of a new setting, `aptPackages` (by default `libatomic1`, `build-essential`,
+`zstd`, `wget` and `skopeo`, which GitHub's `ubuntu-latest` has and the runner image lacks; settable at create), and
+every runner starts from it. Without `zstd` no `actions/cache` saved with it restores; without `libatomic1` pnpm cannot
+start.
 A build that fails is said in `service_logs` with the step and the package manager's last lines, no runner starts
 without the image, and it is tried again after a minute, then less and less often (up to five minutes). An orderly
 stop or restart of the controller inside the machine leaves a runner at its job to finish it, and the next controller

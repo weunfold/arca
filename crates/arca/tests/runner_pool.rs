@@ -2206,11 +2206,11 @@ fn the_shipped_template_is_a_virtual_machine_with_its_script_its_secrets_and_pin
     }
     let settings = template.settings.as_ref().expect("settings");
     assert_eq!(settings["url"], "https://github.com/example-org");
-    // What GitHub's ubuntu-latest has and the pinned runner image lacks: libatomic1, and make, gcc and g++. Node.js is
-    // not added: a job sets up its own.
+    // What GitHub's ubuntu-latest has and the pinned runner image lacks (DEFAULT_PACKAGES). Node.js is not added: a
+    // job sets up its own.
     assert_eq!(
         settings["aptPackages"],
-        json!(["libatomic1", "build-essential"])
+        json!(DEFAULT_PACKAGES.split(' ').collect::<Vec<_>>())
     );
     // Both images are pinned by digest, and the description names the releases the digests are of.
     for key in ["runnerImage", "dockerImage"] {
@@ -4189,6 +4189,32 @@ fn a_runner_that_updated_before_it_was_asked_and_stops_after_an_unclear_answer_i
 // The runner image with its packages
 // ---------------------------------------------------------------------------------------------------------------------
 
+/// The packages a pool adds to the runner image when its settings name none, in the template and in the script alike:
+/// what GitHub's ubuntu-latest has and the pinned runner image (Ubuntu 24.04) lacks. libatomic1 is what pnpm loads;
+/// build-essential is make, gcc and g++; zstd is what actions/cache compresses with (without it the cache falls back
+/// to gzip, another cache version, and no cache saved with zstd restores); wget and skopeo are plain Ubuntu packages
+/// that jobs expect.
+const DEFAULT_PACKAGES: &str = "libatomic1 build-essential zstd wget skopeo";
+
+/// A person using the pool found that no actions/cache restored (zstd missing) and that pnpm could not start
+/// (libatomic1 missing): both are in the template's default list, which a create without aptPackages keeps.
+#[test]
+fn the_default_packages_carry_zstd_for_the_actions_cache_and_libatomic1_for_pnpm() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates");
+    let template =
+        arca::service::load_template(&dir, "github-runner-pool").expect("the template loads");
+    let settings = template.settings.as_ref().expect("settings");
+    let packages: Vec<&str> = settings["aptPackages"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .map(|package| package.as_str().expect("a name"))
+        .collect();
+    for needed in ["zstd", "libatomic1", "build-essential", "wget", "skopeo"] {
+        assert!(packages.contains(&needed), "{needed} not in {packages:?}");
+    }
+}
+
 /// The recipe the controller builds the runner image from, for these packages.
 fn recipe(packages: &str) -> String {
     format!(
@@ -4232,7 +4258,7 @@ fn the_runner_image_is_built_once_from_the_pinned_image_with_the_default_package
     wait_for(&pool, "a second runner", || {
         github.registrations().len() >= 2 && github.live().len() == 1
     });
-    // One build, from the pinned runner image, with libatomic1 and build-essential, under the pool's own name.
+    // One build, from the pinned runner image, with the default packages, under the pool's own name.
     let built = builds(&pool);
     assert_eq!(built.len(), 1, "{built:?}");
     let tag = built[0]
@@ -4247,7 +4273,7 @@ fn the_runner_image_is_built_once_from_the_pinned_image_with_the_default_package
     );
     assert_eq!(
         pool.read("docker/dockerfiles.log"),
-        recipe("libatomic1 build-essential")
+        recipe(DEFAULT_PACKAGES)
     );
     // It was built before any slot was begun, and both runners started from it.
     let calls = pool.read("docker/calls.log");
@@ -4406,7 +4432,7 @@ fn a_runner_image_that_cannot_be_built_is_said_and_no_runner_starts_on_it() {
     let output = pool.output();
     assert!(
         output.contains(&format!(
-            "could not be built (docker build FROM {RUNNER_IMAGE}, step apt-get install libatomic1 build-essential): "
+            "could not be built (docker build FROM {RUNNER_IMAGE}, step apt-get install {DEFAULT_PACKAGES}): "
         )),
         "{output}"
     );

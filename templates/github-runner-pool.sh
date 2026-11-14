@@ -69,9 +69,11 @@ fold head id install mkdir mount mv od rm sha256sum sleep stat tail tee touch tr
 POOL_PACKAGES='docker.io docker-cli curl jq openssl ca-certificates util-linux mount coreutils hostname'
 # The Ubuntu packages added to the runner image when the settings name none (aptPackages): what GitHub's own
 # ubuntu-latest has and the pinned runner image lacks. libatomic1 is what Node.js-based tools such as pnpm load;
-# build-essential is make, gcc and g++. Node.js is not one: a job sets up its own (actions/setup-node), and the runner
+# build-essential is make, gcc and g++; zstd is what actions/cache compresses with when it is there (without it the
+# cache falls back to gzip, a different cache version, so no cache saved with zstd restores); wget fetches files and
+# skopeo copies container images. Node.js is not one: a job sets up its own (actions/setup-node), and the runner
 # carries its own for JavaScript actions.
-POOL_RUNNER_PACKAGES='libatomic1 build-essential'
+POOL_RUNNER_PACKAGES='libatomic1 build-essential zstd wget skopeo'
 # The runner image's own user and docker group (the image fixes both).
 RUNNER_UID=1001
 DOCKER_GID=123
