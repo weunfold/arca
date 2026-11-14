@@ -865,12 +865,16 @@ is its own instance, and the upgrade does not touch it. Its `service_status` sho
 (`"state": "differs"`, the new digest as `templatePin`). A new service pulls 3.136.4.
 
 Keep a running service on the release it has, unless you move it yourself: Arca does not move one to its template's
-version by itself. A container moves in place with `service_update {name, digest}`, its data volume kept: to the digest
-an OCI template now names, or, for a service made from a local image pinned by fingerprint (the hand-built
-`automagik`, say), to that image's fingerprint, which must already be in the service project's image store. Keep the
-old image there until the update has succeeded, since a rollback in a project without snapshots rebuilds the old root
-from it. A virtual machine has no update path: the way is a `service_remove` and a `service_create`, and the remove
-deletes the service's data, which Arca cannot put back into the new service:
+version by itself. A container moves in place with `service_update {name, digest}`: to the digest an OCI template now
+names, or, for a service made from a local image pinned by fingerprint, to that image's fingerprint, which must
+already be in the service project's image store. An update in place needs an image pinned by digest or fingerprint, a
+template port for the health check, and the service's data on a declared volume (a template `data` path): the rebuild
+replaces the root, so whatever the service keeps there is gone, and a service whose template declares a volume it does
+not have is refused. A service that keeps data on its root, whose image is not pinned, or whose template declares no
+port, is not updatable in place: copy the data out, or create a new service. Keep the old image in the store until the
+update has succeeded, since a rollback in a project without snapshots rebuilds the old root from it. A virtual machine
+has no update path: the way is a `service_remove` and a `service_create`, and the remove deletes the service's data,
+which Arca cannot put back into the new service:
 
 - The server's `/data` is its own volume, `<name>-data`, which `service_remove` deletes with the instance. A snapshot
   of the instance leaves that volume out; it needs its own: `snapshot_create` with `{project: "arcak-svc", volume:
@@ -1624,13 +1628,15 @@ A local image is moved by fingerprint: the call's `digest` is the new image's fi
 hex digits, as Incus writes it), and the image must be in the service project's own image store before anything is
 changed. The node reads that store first and refuses, before it stops the service and with "Nothing was changed", when
 no image there has that fingerprint, saying how to put it there (`incus image copy <image> local: --alias <alias>
---project arcak-svc`, or a build in that project). The record's alias becomes the installed template's alias when that
-template pins the same fingerprint, and stays what it was otherwise; the fingerprint decides which image Incus uses.
-**Keep the old image in the store until the update has succeeded**: a rollback in a project that allows no snapshot
-rebuilds the old root from the old fingerprint, and the update answers `rollback_failed` if that image is gone. A
-project that allows snapshots restores the snapshot instead, and the record is put back either way. The update rebuilds
-from the project's own copy, never from an alias alone; a rebuild from an image the store no longer holds fails before
-it takes the old root away.
+--project arcak-svc`, or a build in that project). `action_propose` does not read the image store: a card made before
+the image is put there can be approved, and its run is then refused before anything is changed. The record's alias
+becomes the installed template's alias when that template pins the same fingerprint, and stays what it was otherwise;
+the fingerprint decides which image Incus uses. **Keep the old image in the store until the update has succeeded**: a
+rollback in a project that allows no snapshot rebuilds the old root from the old fingerprint. If that image is gone, a
+rollback after a failed start or health check answers `rollback_failed`; after a failed new rebuild the old root was
+never taken away, so the answer is `rolled_back` with the old root kept. A project that allows snapshots restores the
+snapshot instead, and the record still names the old image either way. The update rebuilds from the project's own copy,
+never from an alias alone; a rebuild from an image the store no longer holds fails before it takes the old root away.
 
 #### A service that keeps its data inside the container
 

@@ -242,8 +242,8 @@ impl StateChanger {
     }
 
     /// Asks Incus to rebuild one instance's root disk from an image and waits for the operation. The instance keeps its
-    /// config, its devices and its uuid. It is the crate's own, for [`crate::function_run`] alone, which sends it to a
-    /// function's stopped instance and to nothing else.
+    /// config, its devices and its uuid. It is the crate's own: [`crate::function_run`] sends it to a function's stopped
+    /// instance, and [`StateChanger::rebuild_from_registry`] and [`StateChanger::rebuild_from_local`] to a service's.
     pub(crate) fn rebuild(
         &self,
         project: &str,

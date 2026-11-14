@@ -764,18 +764,19 @@ impl ServiceHandler {
             service: name.clone(),
             clock: self.clock.clone(),
         };
+        let mut begin = json!({
+            "from": config.source["alias"],
+            "to": digest,
+            "timeoutSeconds": seconds,
+            "eraseData": erase,
+            "tenant": config.tenant.as_ref().map(|tenant| tenant.id.clone()),
+        });
+        // A local alias alone does not say which image a rollback would need from the store.
+        if let Some(fingerprint) = config.source["fingerprint"].as_str() {
+            begin["fromFingerprint"] = json!(fingerprint);
+        }
         journal
-            .line(
-                "begin",
-                true,
-                json!({
-                    "from": config.source["alias"],
-                    "to": digest,
-                    "timeoutSeconds": seconds,
-                    "eraseData": erase,
-                    "tenant": config.tenant.as_ref().map(|tenant| tenant.id.clone()),
-                }),
-            )
+            .line("begin", true, begin)
             .map_err(|_| said("the update journal could not be written"))?;
         // Nothing in a tenant's project is fetched with the node's credential.
         let registry = if config.tenant.is_some() {

@@ -1306,6 +1306,70 @@ fn local_update_keeps_the_alias_the_record_has_when_the_template_pins_another_fi
 }
 
 #[test]
+fn local_update_takes_the_template_alias_only_for_the_fingerprint_it_pins() {
+    let up = Arc::new(AtomicBool::new(true));
+    let (rig, old) = local_rig(&up);
+    let next = rig.fake.add_image(PROJECT, "worker-image-next");
+    let later = rig.fake.add_image(PROJECT, "worker-image-later");
+    assert_ne!(next, old);
+    assert_ne!(later, next);
+
+    // The template names the service's own image under another alias. The fingerprint is the same image, so the
+    // update is a no-op and the record keeps its alias: a comparison of whole sources would rebuild and take it.
+    rig.template("worker", local_template("worker-image-same", &old));
+    let same = update(
+        &rig,
+        json!({ "name": "worker", "digest": format!("sha256:{old}") }),
+    )
+    .expect("the same image");
+    assert_eq!(same["updated"], false);
+    assert!(rig.fake.rebuilds(PROJECT, "worker").is_empty());
+    assert_eq!(
+        source_of(&rig, "worker"),
+        json!({ "type": "image", "alias": LOCAL_ALIAS, "fingerprint": old })
+    );
+
+    // The template pins the new fingerprint under an alias of its own: the record takes that alias, and the journal
+    // begin line carries the old fingerprint the rollback would need from the store.
+    rig.template("worker", local_template("worker-image-template", &next));
+    update(
+        &rig,
+        json!({ "name": "worker", "digest": format!("sha256:{next}"), "timeoutSeconds": 1 }),
+    )
+    .expect("the update to the pinned image runs");
+    assert_eq!(
+        source_of(&rig, "worker"),
+        json!({ "type": "image", "alias": "worker-image-template", "fingerprint": next })
+    );
+    let begin: Value = fs::read_to_string(rig.dir.join("service-updates.jsonl"))
+        .expect("the journal")
+        .lines()
+        .next()
+        .map(|line| serde_json::from_str(line).expect("a JSON line"))
+        .expect("a begin line");
+    assert_eq!(begin["step"], "begin");
+    assert_eq!(begin["detail"]["from"], LOCAL_ALIAS);
+    assert_eq!(begin["detail"]["fromFingerprint"], old);
+
+    // The template now pins another fingerprint under another alias: moving to a third image keeps the record's alias.
+    rig.template("worker", local_template("worker-image-other", &next));
+    update(
+        &rig,
+        json!({ "name": "worker", "digest": format!("sha256:{later}"), "timeoutSeconds": 1 }),
+    )
+    .expect("the update to the third image runs");
+    assert_eq!(
+        source_of(&rig, "worker"),
+        json!({ "type": "image", "alias": "worker-image-template", "fingerprint": later }),
+        "the template alias belongs to the fingerprint it pins, not to this update"
+    );
+    assert_eq!(
+        rig.fake.rebuilds(PROJECT, "worker"),
+        vec![format!("store:{next}"), format!("store:{later}")]
+    );
+}
+
+#[test]
 fn local_update_to_an_image_the_project_does_not_hold_is_refused_and_changes_nothing() {
     let up = Arc::new(AtomicBool::new(true));
     let (rig, old) = local_rig(&up);
