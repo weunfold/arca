@@ -247,10 +247,15 @@ pub enum ServiceFile {
     GuestSecret(SecretName),
     /// The Caddyfile of an edge service ([`EDGE_CONFIG`]), which Arca renders whole from the node's routes.
     EdgeConfig,
+    /// The copy of that Caddyfile an edge keeps on its data volume ([`EDGE_CONFIG_KEPT`]), written only while it runs. The
+    /// template's entrypoint puts it back in place when an update or a re-create left the image's own file there.
+    EdgeConfigKept,
 }
 
 /// Where an edge service's Caddy reads its config: the path the `arca-edge` template runs Caddy with.
 pub const EDGE_CONFIG: &str = "/etc/caddy/Caddyfile";
+/// Where an edge keeps a copy of its Caddyfile on its data volume, so a rebuilt root gets its routes back.
+pub const EDGE_CONFIG_KEPT: &str = "/data/Caddyfile";
 #[derive(Clone, Debug)]
 pub struct SecretName(String);
 impl SecretName {
@@ -274,6 +279,7 @@ impl ServiceFile {
             Self::GuestSecretsDir => GUEST_SECRETS_DIR.into(),
             Self::GuestSecret(key) => format!("{GUEST_SECRETS_DIR}/{}", key.0),
             Self::EdgeConfig => EDGE_CONFIG.into(),
+            Self::EdgeConfigKept => EDGE_CONFIG_KEPT.into(),
         }
     }
     /// The Incus file type and mode the destination is written with: a private directory, or a private file.
@@ -476,9 +482,10 @@ impl UnixIncusWriter {
         // an instance of the node's own project only.
         let (path, project) = match file {
             ServiceFile::GuestSecretsDir | ServiceFile::GuestSecret(_) => guest_target(owned)?,
-            ServiceFile::TailnetKey | ServiceFile::Secret(_) | ServiceFile::EdgeConfig => {
-                (target(owned)?, SERVICE_PROJECT)
-            }
+            ServiceFile::TailnetKey
+            | ServiceFile::Secret(_)
+            | ServiceFile::EdgeConfig
+            | ServiceFile::EdgeConfigKept => (target(owned)?, SERVICE_PROJECT),
         };
         let (kind, mode) = file.kind();
         if bytes.len() > OUTPUT_CAP

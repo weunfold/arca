@@ -4687,21 +4687,30 @@ loopback and a private route could not tell the local network from the internet.
   It runs from a proposal the owner approves (its card names the address, the instance, the port, the reach in words and
   the edge that serves it), or directly for a `doctor` token, as `service_connect` does.
 - **`route_remove`** `{"hostname": "app.example.com"}`: the site leaves the edge's config, Caddy is reloaded and the
-  edge's rules no longer open the instance's port for it. The instance is not touched.
+  edge's rules no longer open the instance's port for it. The instance is not touched. A name with no route still has
+  the config written again and reloaded (`removed: false`), so a remove the edge did not take is retried by removing
+  again.
 - **`route_list`** `{}` (viewer): every route, and the edge with the address a person reaches it on.
 
 The answer of a write says `applied` (the edge took the new config: it was written into the edge, and reloaded when the
-edge runs) and `reloaded` (Caddy reloaded it). An edge that is stopped gets the file and reads it when it starts. A config Caddy refuses keeps the old one serving: the route
-stays recorded, the answer says why, and the same `route_add` again, or the next route change, writes it once more.
+edge runs) and `reloaded` (Caddy reloaded it). An edge that is stopped gets the file and reads it when it starts. A
+config Caddy refuses keeps the old one serving, and the old one is put back in its file, so a restart serves it too: the
+change stays recorded, the answer says why, and the same call again, or the next route change, writes it once more.
+
+Once Caddy takes a config, the edge keeps a copy on its data volume (`/data/Caddyfile`). An update of the edge rebuilds
+its root from the new image, and a re-created edge starts from the image too; either way the template's entrypoint puts
+the kept copy back before Caddy starts, so the routes come back with the edge.
 
 What the edge reaches:
 
 - **An instance outside Arca's projects** keeps its own firewall. Arca never writes in `default`: allow tcp to the
-  route's port from the edge's address (`route_list` shows it under `edge.ipv4`) in that instance's own ACL.
+  route's port from the edge's address (`route_list` shows it under `edge.ipv4`) in that instance's own ACL. Traffic
+  between two Incus bridges keeps its source address, so the instance sees the edge's own address, not its bridge's
+  gateway.
 - **An Arca service of this node** is reached through a link from the edge: run `service_connect` with `{"from":
   "edge", "to": "<service>"}` first, and use the port the link opens (the service's first port).
 - An application that checks where requests come from (Home Assistant's `trusted_proxies`, for example) names the
-  edge's address.
+  edge's address. The client's own address reaches it in `X-Forwarded-For`.
 
 ### Names
 

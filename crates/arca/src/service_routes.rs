@@ -86,6 +86,13 @@ pub(super) fn edge_fact(entries: &[Entry]) -> String {
     }
 }
 
+/// What writing an edge's config did: Caddy took it (or the edge does not run, so it reads it when it starts), and
+/// whether the copy on the edge's data volume ([`ServiceFile::EdgeConfigKept`]) was written too.
+struct Applied {
+    reloaded: bool,
+    kept: bool,
+}
+
 impl ServiceHandler {
     pub(super) fn call_routes(
         &self,
@@ -99,50 +106,69 @@ impl ServiceHandler {
         }
         let hostname = hostname_arg(args)?;
         let (edge_entry, mut edge) = edge_of(entries).ok_or_else(no_edge)?;
-        let mut record = edge.edge.clone().unwrap_or_default();
-        let (answer, removed) = if self.verb == "route_add" {
-            let route = self.route_from(args, &hostname, &edge, entries)?;
-            let answer = route.view();
-            record.put(route);
-            (answer, None)
+        let before = edge.edge.clone().unwrap_or_default();
+        let mut record = before.clone();
+        let removing = self.verb == "route_remove";
+        let mut answer = if removing {
+            match record.remove(&hostname) {
+                Some(removed) => {
+                    let mut view = removed.view();
+                    view["removed"] = json!(true);
+                    view
+                }
+                // A remove of a name that has no route still writes the config from the routes the record holds, and
+                // reloads: a remove whose write or reload failed is then retried by removing again.
+                None => json!({
+                    "hostname": hostname,
+                    "url": format!("https://{hostname}"),
+                    "removed": false,
+                }),
+            }
         } else {
-            let removed = record.remove(&hostname).ok_or_else(|| {
-                service_not_found(format!(
-                    "route {hostname}: this node has no route of that name"
-                ))
-            })?;
-            (removed.view(), Some(removed))
+            let route = self.route_from(args, &hostname, &edge, entries)?;
+            let view = route.view();
+            record.put(route);
+            view
         };
-        edge.edge = Some(record.clone());
-        edge.environment_patch = Some(BTreeSet::new());
-        self.put(std::slice::from_ref(&edge), now)?;
-        let applied = self.write_edge(&edge_entry, &edge, &record, caller);
-        let mut answer = answer;
+        if record != before {
+            edge.edge = Some(record.clone());
+            edge.environment_patch = Some(BTreeSet::new());
+            self.put(std::slice::from_ref(&edge), now)?;
+        }
+        let applied = self.write_edge(&edge_entry, &edge, &record, &before, caller);
         answer["edge"] = json!({
             "name": edge.name,
             "address": edge_address(&edge),
         });
-        match applied {
-            Ok(reloaded) => {
-                answer["applied"] = json!(true);
-                answer["reloaded"] = json!(reloaded);
-                if !reloaded {
-                    answer["note"] = json!(
-                        "the edge is not running: its new config is written and Caddy reads it when the edge starts"
-                    );
-                }
-            }
-            Err(why) => {
-                answer["applied"] = json!(false);
-                answer["reloaded"] = json!(false);
-                answer["note"] = json!(format!(
-                    "the route is recorded, but the edge did not take its new config: {why}. Add the route again once the edge runs"
-                ));
-            }
-        }
-        if let Some(removed) = removed {
-            answer["removed"] = json!(true);
-            answer["hostname"] = json!(removed.hostname);
+        let gone = removing && answer["removed"] == true;
+        let none = removing && answer["removed"] == false;
+        let note = match &applied {
+            Ok(Applied { reloaded: true, kept: true }) if none => Some(
+                "this node had no route of that name; the edge's config was written again from the routes it has, and Caddy took it"
+                    .to_string(),
+            ),
+            Ok(Applied { reloaded: true, kept: true }) => None,
+            Ok(Applied { reloaded: true, kept: false }) => Some(
+                "Caddy took the new config, but its copy on the edge's data volume could not be written: an update of the edge would serve the routes as they were before this change until the next route change"
+                    .to_string(),
+            ),
+            Ok(Applied { reloaded: false, .. }) => Some(
+                "the edge is not running: its new config is written and Caddy reads it when the edge starts".to_string(),
+            ),
+            Err(why) if gone => Some(format!(
+                "the route is no longer recorded, but the edge did not take its new config: {why}. Until it does, the edge may still serve this name. Remove it again once the edge runs, which writes the config again"
+            )),
+            Err(why) if none => Some(format!(
+                "this node had no route of that name, and the edge did not take its config: {why}. Remove it again once the edge runs"
+            )),
+            Err(why) => Some(format!(
+                "the route is recorded, but the edge did not take its new config: {why}. Add the route again once the edge runs"
+            )),
+        };
+        answer["applied"] = json!(applied.is_ok());
+        answer["reloaded"] = json!(matches!(applied, Ok(Applied { reloaded: true, .. })));
+        if let Some(note) = note {
+            answer["note"] = json!(note);
         }
         Ok(answer)
     }
@@ -234,15 +260,18 @@ impl ServiceHandler {
         })
     }
 
-    /// Writes the Caddyfile of `record` into the edge, and reloads Caddy when the edge runs. `Ok(false)` when it does not
-    /// run: the file is there for its next start.
+    /// Writes the Caddyfile of `record` into the edge, and reloads Caddy when the edge runs. Once Caddy took it, the copy
+    /// on the data volume is written too, so the volume only ever keeps a config Caddy accepted. A reload Caddy refuses
+    /// puts the render of `before` back on the root, so the edge still starts on the config it serves. `reloaded` is false
+    /// when the edge does not run: the file is there for its next start.
     fn write_edge(
         &self,
         entry: &Entry,
         edge: &ServiceConfig,
         record: &EdgeRecord,
+        before: &EdgeRecord,
         caller: &Caller,
-    ) -> Result<bool, String> {
+    ) -> Result<Applied, String> {
         let owned = self
             .live_owned(entry, edge)
             .map_err(|error| words(&error))?;
@@ -253,36 +282,55 @@ impl ServiceHandler {
             .exec
             .writer(&target, Duration::from_secs(10))
             .map_err(|_| "this node could not reach Incus".to_string())?;
+        let rendered = route::caddyfile(record);
         writer
-            .write_service_file(
-                &owned,
-                &ServiceFile::EdgeConfig,
-                route::caddyfile(record).as_bytes(),
-            )
+            .write_service_file(&owned, &ServiceFile::EdgeConfig, rendered.as_bytes())
             .map_err(|_| "Incus did not take the edge's config file".to_string())?;
         let (state, _) = writer
             .get_etag(owned.target())
             .map_err(|_| "this node could not read the edge's state".to_string())?;
         if state["status"] != "Running" {
-            return Ok(false);
+            return Ok(Applied {
+                reloaded: false,
+                kept: false,
+            });
         }
         let secrets = service_secret_values(&self.cfg.state_dir.join("secrets"));
-        self.exec
-            .run(
-                &target,
-                &caller.token_id,
-                self.verb,
-                &ExecCommand::EdgeReload,
-                &secrets,
-                None,
-            )
-            .map(|_| true)
-            .map_err(|error| match error {
-                crate::service_exec::ExecError::Failed(why) => {
-                    format!("Caddy refused the reload ({why}); the old config still serves")
+        let reload = self.exec.run(
+            &target,
+            &caller.token_id,
+            self.verb,
+            &ExecCommand::EdgeReload,
+            &secrets,
+            None,
+        );
+        if let Err(error) = reload {
+            let restored = writer
+                .write_service_file(
+                    &owned,
+                    &ServiceFile::EdgeConfig,
+                    route::caddyfile(before).as_bytes(),
+                )
+                .is_ok();
+            return Err(match error {
+                crate::service_exec::ExecError::Failed(why) if restored => {
+                    format!(
+                        "Caddy refused the reload ({why}); the old config still serves, and is back in its file"
+                    )
                 }
+                crate::service_exec::ExecError::Failed(why) => format!(
+                    "Caddy refused the reload ({why}); the old config still serves, but the refused one stays in its file until the next change"
+                ),
                 other => words(&other.call_error()),
-            })
+            });
+        }
+        let kept = writer
+            .write_service_file(&owned, &ServiceFile::EdgeConfigKept, rendered.as_bytes())
+            .is_ok();
+        Ok(Applied {
+            reloaded: true,
+            kept,
+        })
     }
 
     fn route_list(&self, entries: &[Entry]) -> Value {

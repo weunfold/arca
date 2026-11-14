@@ -1071,17 +1071,17 @@ static VERBS: [Verb; 72] = [
     },
     Verb {
         name: "route_remove",
-        summary: "Stop serving a hostname from this node's edge: its site leaves the edge's config, Caddy is reloaded and the edge's firewall no longer opens its target for it. The instance itself is not touched. Runs from an approved proposal or a doctor token.",
+        summary: "Stop serving a hostname from this node's edge: its site leaves the edge's config, Caddy is reloaded and the edge's firewall no longer opens its target for it. The instance itself is not touched. A hostname with no route still has the config written again and reloaded, so a remove whose reload failed is retried by removing again. Runs from an approved proposal or a doctor token.",
         class: VerbClass::L,
         min_scope: Scope::Doctor,
         writes: true,
         destructive: false,
         untrusted: false,
         output_key: None,
-        summary_text: summary_route,
+        summary_text: summary_route_remove,
         cut: no_cut,
         params: route_remove_params,
-        result: route_result,
+        result: route_remove_result,
     },
     Verb {
         name: "route_list",
@@ -1176,16 +1176,23 @@ fn route_result() -> Value {
     );
     properties.insert("applied".into(), json!({ "type": "boolean" }));
     properties.insert("reloaded".into(), json!({ "type": "boolean" }));
-    properties.insert(
-        "removed".into(),
-        json!({ "const": true, "type": "boolean" }),
-    );
     properties.insert("note".into(), json!({ "type": "string" }));
     schema["required"].as_array_mut().expect("a list").extend([
         json!("edge"),
         json!("applied"),
         json!("reloaded"),
     ]);
+    schema
+}
+/// What a remove answers: the route it removed, or only the hostname when there was none (`removed` false), and what
+/// writing the edge's config did.
+fn route_remove_result() -> Value {
+    let mut schema = route_result();
+    schema["properties"]
+        .as_object_mut()
+        .expect("an object")
+        .insert("removed".into(), json!({ "type": "boolean" }));
+    schema["required"] = json!(["hostname", "url", "removed", "edge", "applied", "reloaded"]);
     schema
 }
 fn route_list_result() -> Value {
@@ -1207,11 +1214,7 @@ fn route_list_result() -> Value {
     })
 }
 fn summary_route(v: &Value) -> String {
-    let what = if v["removed"] == true {
-        "removed"
-    } else {
-        "serving"
-    };
+    let what = "serving";
     let state = if v["reloaded"] == true {
         "the edge took it"
     } else if v["applied"] == true {
@@ -1226,6 +1229,25 @@ fn summary_route(v: &Value) -> String {
         v["port"],
         v["reach"].as_str().unwrap_or("?")
     )
+}
+fn summary_route_remove(v: &Value) -> String {
+    let url = v["url"].as_str().unwrap_or("?");
+    let state = if v["reloaded"] == true {
+        "the edge took it"
+    } else if v["applied"] == true {
+        "written; the edge reads it when it starts"
+    } else {
+        "the edge did not take the new config and may still serve the name; remove it again once the edge runs"
+    };
+    if v["removed"] == true {
+        format!(
+            "stopped serving {url} (was {}:{}): {state}",
+            v["instance"].as_str().unwrap_or("?"),
+            v["port"]
+        )
+    } else {
+        format!("{url} had no route; the edge's config was written again: {state}")
+    }
 }
 fn summary_route_list(v: &Value) -> String {
     let routes = v["routes"].as_array().map_or(0, Vec::len);

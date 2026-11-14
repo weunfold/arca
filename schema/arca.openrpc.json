@@ -3116,7 +3116,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "The args of route_remove: Stop serving a hostname from this node's edge: its site leaves the edge's config, Caddy is reloaded and the edge's firewall no longer opens its target for it. The instance itself is not touched. Runs from an approved proposal or a doctor token. Example: {\"hostname\":\"app.example.com\"}",
+                "description": "The args of route_remove: Stop serving a hostname from this node's edge: its site leaves the edge's config, Caddy is reloaded and the edge's firewall no longer opens its target for it. The instance itself is not touched. A hostname with no route still has the config written again and reloaded, so a remove whose reload failed is retried by removing again. Runs from an approved proposal or a doctor token. Example: {\"hostname\":\"app.example.com\"}",
                 "examples": [
                   {
                     "hostname": "app.example.com"
@@ -11403,10 +11403,6 @@
             "reloaded": {
               "type": "boolean"
             },
-            "removed": {
-              "const": true,
-              "type": "boolean"
-            },
             "url": {
               "type": "string"
             }
@@ -11500,7 +11496,6 @@
               "type": "boolean"
             },
             "removed": {
-              "const": true,
               "type": "boolean"
             },
             "url": {
@@ -11510,11 +11505,7 @@
           "required": [
             "hostname",
             "url",
-            "instance",
-            "project",
-            "address",
-            "port",
-            "reach",
+            "removed",
             "edge",
             "applied",
             "reloaded"
@@ -11522,7 +11513,7 @@
           "type": "object"
         }
       },
-      "summary": "Stop serving a hostname from this node's edge: its site leaves the edge's config, Caddy is reloaded and the edge's firewall no longer opens its target for it. The instance itself is not touched. Runs from an approved proposal or a doctor token.",
+      "summary": "Stop serving a hostname from this node's edge: its site leaves the edge's config, Caddy is reloaded and the edge's firewall no longer opens its target for it. The instance itself is not touched. A hostname with no route still has the config written again and reloaded, so a remove whose reload failed is retried by removing again. Runs from an approved proposal or a doctor token.",
       "x-arca-additional-properties": true,
       "x-arca-class": "L",
       "x-arca-read-only-hint": false,

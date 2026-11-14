@@ -4,7 +4,7 @@
   "kind": "oci",
   "image": "docker.io/caddybuilds/caddy-cloudflare",
   "digest": "sha256:17505a5e55432764957953787b065f400a1f1a0c280c3b4da2c99ce4746708d6",
-  "entrypoint": ["/usr/bin/caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"],
+  "entrypoint": ["/bin/sh", "-ec", { "file": "arca-edge.sh" }, "arca-edge"],
   "ports": [443],
   "data": { "path": "/data", "uid": 0, "gid": 0, "size": "1GiB" },
   "env": { "CLOUDFLARE_API_TOKEN": "{{secret:CLOUDFLARE_API_TOKEN}}" },

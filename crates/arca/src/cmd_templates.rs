@@ -30,6 +30,7 @@ macro_rules! shipped {
 /// inputs (`automagik.build.sh`, `automagik-dsh/`) are used from a checkout and are not installed.
 pub const SHIPPED: &[(&str, &str)] = shipped![
     "arca-edge.json",
+    "arca-edge.sh",
     "automagik-server.json",
     "automagik-workspace.json",
     "automagik-workspace.sh",

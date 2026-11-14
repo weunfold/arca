@@ -4510,6 +4510,7 @@ fn private_port_arg(listen: &crate::service::PrivateListen) -> Value {
 /// Why the private port a service's record names does not stand as recorded: the device on its instance, then the
 /// address on this host (`hosts`, when it could be read). `None` when both are as the record says.
 fn private_port_problem(
+    config: &crate::service::ServiceConfig,
     private: &crate::service::PrivateListen,
     live: Option<&Value>,
     hosts: Option<&Value>,
@@ -4517,7 +4518,9 @@ fn private_port_problem(
     let Some(live) = live else {
         return Some("its instance is gone".to_string());
     };
-    if live["devices"][crate::service::PRIVATE_DEVICE] != crate::service::private_device(private) {
+    if live["devices"][crate::service::PRIVATE_DEVICE]
+        != crate::service::private_device_of(config, private)
+    {
         return Some(format!(
             "its instance does not carry the device {} as Arca made it",
             crate::service::PRIVATE_DEVICE
@@ -7285,7 +7288,7 @@ impl ServiceHandler {
                     // address on this host. An address that cannot be read now is not called missing.
                     if let Some(private) = &config.private_port {
                         let hosts = host_observation(&read).ok();
-                        let problem = private_port_problem(private, live, hosts.as_ref());
+                        let problem = private_port_problem(&config, private, live, hosts.as_ref());
                         view["privatePort"]["ready"] = json!(problem.is_none());
                         if let Some(problem) = problem {
                             view["privatePort"]["problem"] = json!(problem);

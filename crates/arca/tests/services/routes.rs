@@ -3,7 +3,7 @@
 //! example.com and every address synthetic.
 use super::*;
 use arca::route::{self, EdgeRecord, Reach, Route};
-use arca_incus::exec::{EDGE_CONFIG, ExecCommand};
+use arca_incus::exec::{EDGE_CONFIG, EDGE_CONFIG_KEPT, ExecCommand};
 use arca_incus::fake::ExecScript;
 
 /// The address the served instance holds on its own bridge: private, outside the service /24.
@@ -43,14 +43,14 @@ fn reload(rig: &Rig, exit: i64) {
 }
 
 fn written(rig: &Rig) -> String {
-    let files = rig.fake.service_files();
-    String::from_utf8(
-        files
-            .get(&format!("{PROJECT}/edge:{EDGE_CONFIG}"))
-            .expect("the edge's config was written")
-            .clone(),
-    )
-    .unwrap()
+    file(rig, EDGE_CONFIG).expect("the edge's config was written")
+}
+
+fn file(rig: &Rig, path: &str) -> Option<String> {
+    rig.fake
+        .service_files()
+        .get(&format!("{PROJECT}/edge:{path}"))
+        .map(|bytes| String::from_utf8(bytes.clone()).unwrap())
 }
 
 fn record(rig: &Rig) -> EdgeRecord {
@@ -174,10 +174,166 @@ fn adding_a_hostname_again_re_points_it_and_remove_takes_it_all_back() {
     assert!(record(&rig).routes.is_empty());
     assert!(!written(&rig).contains("app.example.com"));
     assert!(!opens(&egress(&rig), TARGET, 9090));
+    // A remove of a name that has no route writes the config again and reloads, so it can be retried.
+    reload(&rig, 0);
     let again = rig
         .call("route_remove", json!({"hostname":"app.example.com"}))
-        .expect_err("nothing to remove");
-    assert!(matches!(again, CallError::Refused { code, .. } if code == "not_found"));
+        .expect("written again");
+    assert_eq!(again["removed"], false);
+    assert_eq!(again["applied"], true);
+    assert_eq!(again["reloaded"], true);
+    assert!(record(&rig).routes.is_empty());
+}
+
+#[test]
+fn a_config_caddy_took_is_kept_on_the_data_volume_and_a_refused_one_is_taken_back() {
+    let rig = edge_rig();
+    reload(&rig, 0);
+    rig.call(
+        "route_add",
+        json!({"hostname":"app.example.com","instance":"app","project":"other","port":8080}),
+    )
+    .expect("the route");
+    let good = route::caddyfile(&record(&rig));
+    assert_eq!(written(&rig), good);
+    assert_eq!(file(&rig, EDGE_CONFIG_KEPT).as_deref(), Some(good.as_str()));
+    // Caddy refuses the next one: the root file goes back to the config that serves, and the kept copy stays.
+    reload(&rig, 1);
+    let refused = rig
+        .call(
+            "route_add",
+            json!({"hostname":"two.example.com","instance":"app","project":"other","port":9090}),
+        )
+        .expect("recorded");
+    assert_eq!(refused["applied"], false);
+    assert!(
+        refused["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("back in its file")),
+        "{refused}"
+    );
+    assert_eq!(written(&rig), good);
+    assert_eq!(file(&rig, EDGE_CONFIG_KEPT).as_deref(), Some(good.as_str()));
+    // The same add again retries the write and the reload.
+    reload(&rig, 0);
+    let retried = rig
+        .call(
+            "route_add",
+            json!({"hostname":"two.example.com","instance":"app","project":"other","port":9090}),
+        )
+        .expect("retried");
+    assert_eq!(retried["reloaded"], true);
+    assert!(written(&rig).contains("two.example.com"));
+    assert_eq!(file(&rig, EDGE_CONFIG_KEPT), Some(written(&rig)));
+}
+
+#[test]
+fn a_remove_the_edge_did_not_take_says_the_route_is_gone_and_is_retried_by_removing_again() {
+    let rig = edge_rig();
+    reload(&rig, 0);
+    rig.call(
+        "route_add",
+        json!({"hostname":"app.example.com","instance":"app","project":"other","port":8080}),
+    )
+    .expect("the route");
+    reload(&rig, 1);
+    let failed = rig
+        .call("route_remove", json!({"hostname":"app.example.com"}))
+        .expect("removed from the record");
+    assert_eq!(failed["removed"], true);
+    assert_eq!(failed["applied"], false);
+    let note = failed["note"].as_str().expect("a note");
+    assert!(note.contains("no longer recorded"), "{note}");
+    assert!(note.contains("Remove it again"), "{note}");
+    assert!(!note.contains("Add the route again"), "{note}");
+    assert!(record(&rig).routes.is_empty());
+    reload(&rig, 0);
+    let again = rig
+        .call("route_remove", json!({"hostname":"app.example.com"}))
+        .expect("retried");
+    assert_eq!(again["removed"], false);
+    assert_eq!(again["reloaded"], true);
+    assert!(!written(&rig).contains("app.example.com"));
+}
+
+/// The template's entrypoint script, run by the host's `sh` with its paths moved into a scratch directory and a
+/// stand-in for Caddy that writes down its arguments.
+fn edge_script(live: Option<&str>, kept: Option<&str>) -> (String, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates/arca-edge.sh"),
+    )
+    .expect("the script");
+    let work = std::env::temp_dir().join(format!(
+        "arca-edge-script-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&work).unwrap();
+    let (live_path, kept_path, args, caddy) = (
+        work.join("Caddyfile"),
+        work.join("kept"),
+        work.join("args"),
+        work.join("caddy"),
+    );
+    if let Some(text) = live {
+        fs::write(&live_path, text).unwrap();
+    }
+    if let Some(text) = kept {
+        fs::write(&kept_path, text).unwrap();
+    }
+    fs::write(
+        &caddy,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", args.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&caddy, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = std::process::Command::new("/bin/sh")
+        .args(["-ec", &script, "arca-edge"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("ARCA_EDGE_CONFIG", &live_path)
+        .env("ARCA_EDGE_KEPT", &kept_path)
+        .env("ARCA_EDGE_CADDY", &caddy)
+        .output()
+        .expect("the shell runs");
+    assert!(output.status.success(), "{output:?}");
+    let ran = (
+        fs::read_to_string(&live_path).unwrap_or_default(),
+        fs::read_to_string(&args).unwrap_or_default(),
+    );
+    fs::remove_dir_all(&work).unwrap();
+    ran
+}
+
+#[test]
+fn the_edge_entrypoint_puts_the_kept_config_back_after_a_rebuild_and_never_over_a_newer_one() {
+    let mut routed = EdgeRecord::default();
+    routed.put(Route {
+        hostname: "app.example.com".into(),
+        instance: "app".into(),
+        project: "other".into(),
+        address: TARGET.parse().unwrap(),
+        port: 8080,
+        reach: Reach::Private,
+    });
+    let kept = route::caddyfile(&routed);
+    let newer = route::caddyfile(&EdgeRecord::default());
+    let stock = ":80 {\n\troot * /usr/share/caddy\n\tfile_server\n}\n";
+    // A rebuilt root holds the image's own file: the kept copy goes back, and Caddy runs it.
+    let (live, args) = edge_script(Some(stock), Some(&kept));
+    assert_eq!(live, kept);
+    assert!(args.starts_with("run\n--config\n"), "{args}");
+    assert!(args.ends_with("--adapter\ncaddyfile\n"), "{args}");
+    // A root file of Arca's is the newer (a route changed while the edge was stopped): it stays.
+    let (live, _) = edge_script(Some(&newer), Some(&kept));
+    assert_eq!(live, newer);
+    // Nothing kept yet: the image's file runs as it is.
+    let (live, _) = edge_script(Some(stock), None);
+    assert_eq!(live, stock);
 }
 
 #[test]

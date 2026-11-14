@@ -659,3 +659,38 @@ fn a_failed_health_check_names_the_private_port_it_probed_and_not_the_first_port
         "{message}"
     );
 }
+
+#[test]
+fn the_shipped_edge_carries_the_proxy_header_on_its_private_port_and_its_status_says_it_stands() {
+    let rig = node(json!([LINK]));
+    let shipped = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates");
+    for file in ["arca-edge.json", "arca-edge.sh"] {
+        std::fs::copy(shipped.join(file), rig.dir.join("templates").join(file))
+            .expect("the shipped file");
+    }
+    rig.approved(
+        "service_create",
+        json!({ "name": "edge", "template": "arca-edge" }),
+    )
+    .expect("the edge");
+    // The device listens on the one address and sends the PROXY header, so Caddy sees each client's own address.
+    let held = instance(&rig, "edge").expect("the instance");
+    assert_eq!(
+        held["devices"]["private"],
+        json!({
+            "type": "proxy",
+            "listen": format!("tcp:{LINK}:443"),
+            "connect": "tcp:127.0.0.1:443",
+            "proxy_protocol": "true"
+        })
+    );
+    // The status compares the device with the one Arca makes for an edge, so it says the port stands.
+    let status = rig
+        .call("service_status", json!({ "name": "edge" }))
+        .expect("status");
+    assert_eq!(
+        status["privatePort"],
+        json!({ "address": LINK, "port": 443, "ready": true }),
+        "{status}"
+    );
+}

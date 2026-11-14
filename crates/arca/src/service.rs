@@ -919,13 +919,7 @@ fn instance_body(cfg: &ServiceConfig, links: &[String]) -> Value {
     }
     if let Some(private) = &cfg.private_port {
         // One address only, never the wildcard: the port is reachable there and from nowhere else.
-        let mut device = private_device(private);
-        if cfg.edge.is_some() {
-            // An edge reads each client's own address from the PROXY header: without it every visitor would come
-            // from the device's loopback, and a private route could not tell the local networks from the internet.
-            device["proxy_protocol"] = json!("true");
-        }
-        devices.insert(PRIVATE_DEVICE.into(), device);
+        devices.insert(PRIVATE_DEVICE.into(), private_device_of(cfg, private));
     }
     if let Some(link) = &cfg.kernel_access {
         devices.insert(KERNEL_DEVICE.into(), kernel_device(link));
@@ -971,6 +965,17 @@ pub fn private_device(private: &PrivateListen) -> Value {
     json!({"type":"proxy",
         "listen":format!("tcp:{}:{}", private.address, private.port),
         "connect":format!("tcp:127.0.0.1:{}", private.port)})
+}
+
+/// The private port's device as the instance of `cfg` carries it: [`private_device`], and for an edge the PROXY header.
+/// An edge reads each client's own address from that header: without it every visitor would come from the device's
+/// loopback, and a private route could not tell the local networks from the internet.
+pub fn private_device_of(cfg: &ServiceConfig, private: &PrivateListen) -> Value {
+    let mut device = private_device(private);
+    if cfg.edge.is_some() {
+        device["proxy_protocol"] = json!("true");
+    }
+    device
 }
 
 /// The body of the create of a service on the managed network, exactly as its record gives it. The effect journal

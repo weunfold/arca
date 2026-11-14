@@ -742,7 +742,10 @@ impl ActionKind {
                     project => project,
                 };
                 vec![
-                    row("Address", &format!("https://{}", text("hostname"))),
+                    row(
+                        "Address",
+                        &format!("https://{}", text("hostname").to_ascii_lowercase()),
+                    ),
                     row("Instance", text("instance")),
                     row("Project", project),
                     row("Port", &args["port"].to_string()),
@@ -758,7 +761,10 @@ impl ActionKind {
                 ]
             }
             Self::RouteRemove => vec![
-                row("Address", &format!("https://{}", text("hostname"))),
+                row(
+                    "Address",
+                    &format!("https://{}", text("hostname").to_ascii_lowercase()),
+                ),
                 row(
                     "Edge",
                     gpu_product.unwrap_or("read when the route is removed"),
@@ -944,11 +950,14 @@ impl ActionKind {
             }
             Self::RouteAdd => format!(
                 "Serve https://{} from the instance {} on port {}",
-                text("hostname"),
+                text("hostname").to_ascii_lowercase(),
                 text("instance"),
                 args["port"]
             ),
-            Self::RouteRemove => format!("Stop serving https://{}", text("hostname")),
+            Self::RouteRemove => format!(
+                "Stop serving https://{}",
+                text("hostname").to_ascii_lowercase()
+            ),
         };
         // A service that can call the kernel is named as one.
         let sentence = if self == Self::ServiceCreate && args.get("kernelAccess").is_some() {

@@ -160,9 +160,11 @@ pub fn project_ok(project: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
-/// The first IPv4 address of an instance's NIC as Incus's full instance reading gives it (`state.network`), or as its
-/// expanded devices fix it: the address of the first NIC with a fixed `ipv4.address`, else the first global IPv4
-/// address the running instance holds on an interface other than loopback and a docker bridge.
+/// The first IPv4 address of an instance's NIC as Incus's full instance reading gives it: the address of the first NIC
+/// (by device name) with a fixed `ipv4.address`, else the first global IPv4 address the running instance holds on one
+/// of its own Incus NICs. A NIC is found in `state.network` by its MAC address (`volatile.<nic>.hwaddr`, or the
+/// device's own `hwaddr`), so a bridge the instance runs inside itself (docker, k8s) is never taken for it. This works
+/// for a VM too, whose interfaces have the guest's names.
 pub fn instance_address(full: &Value) -> Option<Ipv4Addr> {
     for devices in [&full["expanded_devices"], &full["devices"]] {
         let mut fixed: Vec<(&String, Ipv4Addr)> = devices
@@ -182,14 +184,29 @@ pub fn instance_address(full: &Value) -> Option<Ipv4Addr> {
             return Some(*address);
         }
     }
-    let network = full["state"]["network"].as_object()?;
-    let mut names: Vec<&String> = network
-        .keys()
-        .filter(|name| *name != "lo" && !name.starts_with("docker"))
+    let devices = full["expanded_devices"]
+        .as_object()
+        .filter(|devices| !devices.is_empty())
+        .or_else(|| full["devices"].as_object())?;
+    let mut nics: Vec<(&String, String)> = devices
+        .iter()
+        .filter(|(_, device)| device["type"] == "nic")
+        .filter_map(|(name, device)| {
+            full["config"][format!("volatile.{name}.hwaddr")]
+                .as_str()
+                .or_else(|| device["hwaddr"].as_str())
+                .map(|mac| (name, mac.to_ascii_lowercase()))
+        })
         .collect();
-    names.sort();
-    names.into_iter().find_map(|name| {
-        network[name]["addresses"]
+    nics.sort_by(|a, b| a.0.cmp(b.0));
+    let network = full["state"]["network"].as_object()?;
+    nics.into_iter().find_map(|(_, mac)| {
+        let (_, interface) = network.iter().find(|(_, interface)| {
+            interface["hwaddr"]
+                .as_str()
+                .is_some_and(|hwaddr| hwaddr.eq_ignore_ascii_case(&mac))
+        })?;
+        interface["addresses"]
             .as_array()?
             .iter()
             .filter(|address| address["family"] == "inet" && address["scope"] == "global")
@@ -403,21 +420,39 @@ mod tests {
     }
 
     #[test]
-    fn an_instance_address_is_its_fixed_nic_address_or_else_its_first_global_one() {
+    fn an_instance_address_is_its_fixed_nic_address_or_else_its_own_nics_first_global_one() {
         let fixed = json!({"expanded_devices": {"eth0": {"type":"nic","ipv4.address":"192.0.2.63"},
             "root": {"type":"disk"}}});
         assert_eq!(instance_address(&fixed), Some(Ipv4Addr::new(192, 0, 2, 63)));
+        // A docker compose bridge (br-<id>) and a docker0 sort before eth0 and hold global addresses: only the
+        // interface whose MAC is the NIC's own is the instance's.
         let dynamic = json!({"expanded_devices": {"eth0": {"type":"nic","network":"br"}},
+        "config": {"volatile.eth0.hwaddr": "00:16:3E:00:00:0A"},
         "state": {"network": {
-            "lo": {"addresses":[{"family":"inet","address":"127.0.0.1","scope":"local"}]},
-            "docker0": {"addresses":[{"family":"inet","address":"198.51.100.1","scope":"global"}]},
-            "eth0": {"addresses":[{"family":"inet6","address":"fe80::1","scope":"link"},
+            "lo": {"hwaddr":"","addresses":[{"family":"inet","address":"127.0.0.1","scope":"local"}]},
+            "br-0123456789ab": {"hwaddr":"02:42:00:00:00:01","addresses":[{"family":"inet","address":"172.18.0.1","scope":"global"}]},
+            "docker0": {"hwaddr":"02:42:00:00:00:02","addresses":[{"family":"inet","address":"198.51.100.1","scope":"global"}]},
+            "eth0": {"hwaddr":"00:16:3e:00:00:0a","addresses":[{"family":"inet6","address":"fe80::1","scope":"link"},
                 {"family":"inet","address":"192.0.2.10","scope":"global"}]}
         }}});
         assert_eq!(
             instance_address(&dynamic),
             Some(Ipv4Addr::new(192, 0, 2, 10))
         );
+        // A VM names its interfaces itself: the MAC still finds the NIC.
+        let vm = json!({"expanded_devices": {"eth0": {"type":"nic","network":"br"}},
+        "config": {"volatile.eth0.hwaddr": "00:16:3e:00:00:0b"},
+        "state": {"network": {
+            "enp5s0": {"hwaddr":"00:16:3e:00:00:0b","addresses":[{"family":"inet","address":"192.0.2.11","scope":"global"}]}
+        }}});
+        assert_eq!(instance_address(&vm), Some(Ipv4Addr::new(192, 0, 2, 11)));
+        // With no interface of its own NICs, there is no address, never a bridge's.
+        let only_bridges = json!({"expanded_devices": {"eth0": {"type":"nic","network":"br"}},
+        "config": {"volatile.eth0.hwaddr": "00:16:3e:00:00:0c"},
+        "state": {"network": {
+            "br-0123456789ab": {"hwaddr":"02:42:00:00:00:01","addresses":[{"family":"inet","address":"172.18.0.1","scope":"global"}]}
+        }}});
+        assert_eq!(instance_address(&only_bridges), None);
         assert_eq!(instance_address(&json!({})), None);
     }
 }
