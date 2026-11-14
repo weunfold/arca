@@ -259,13 +259,43 @@ enum AuthorizeFail {
     },
 }
 
-/// A page refusal: a status, a code and the owner's words.
-fn refused(status: StatusCode, code: &str, message: impl Into<String>) -> Response {
-    (
+/// A page refusal: a status, a code and the owner's words. A bare one is the status alone.
+#[derive(Debug)]
+pub struct Refusal {
+    pub status: StatusCode,
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl Refusal {
+    fn bare(status: StatusCode) -> Self {
+        Self {
+            status,
+            code: "",
+            message: String::new(),
+        }
+    }
+}
+
+impl IntoResponse for Refusal {
+    fn into_response(self) -> Response {
+        if self.code.is_empty() {
+            return self.status.into_response();
+        }
+        (
+            self.status,
+            Json(json!({ "refusal": self.code, "message": self.message })),
+        )
+            .into_response()
+    }
+}
+
+fn refused(status: StatusCode, code: &'static str, message: impl Into<String>) -> Refusal {
+    Refusal {
         status,
-        Json(json!({ "refusal": code, "message": message.into() })),
-    )
-        .into_response()
+        code,
+        message: message.into(),
+    }
 }
 
 impl OAuth {
@@ -613,7 +643,7 @@ impl OAuth {
         })
     }
 
-    fn begin(&self, id: &str) -> Result<Value, Response> {
+    fn begin(&self, id: &str) -> Result<Value, Refusal> {
         let now = self.now();
         let kernel = self.kernel.lock().map_err(|_| internal())?;
         if let Some(refusal) = kernel.owner_passkey_refusal() {
@@ -679,7 +709,7 @@ impl OAuth {
         }))
     }
 
-    fn approve(&self, id: &str, statement: &str, proof: &Value) -> Result<Value, Response> {
+    fn approve(&self, id: &str, statement: &str, proof: &Value) -> Result<Value, Refusal> {
         let now = self.now();
         let (pending, client) = {
             let mut inner = self.lock();
@@ -786,7 +816,7 @@ impl OAuth {
         }))
     }
 
-    fn deny(&self, id: &str) -> Result<Value, Response> {
+    fn deny(&self, id: &str) -> Result<Value, Refusal> {
         let now = self.now();
         let mut inner = self.lock();
         Self::sweep(&mut inner, now);
@@ -1103,7 +1133,7 @@ impl OAuth {
     }
 
     /// Revokes a client: every grant it holds ends, and it can be approved again only after it registers again.
-    pub fn revoke_client(&self, id: &str, by: &str) -> Result<Value, Response> {
+    pub fn revoke_client(&self, id: &str, by: &str) -> Result<Value, Refusal> {
         let now = self.now();
         let mut inner = self.lock();
         let Some(index) = inner
@@ -1252,7 +1282,7 @@ fn token_answer(access: &str, refresh: &str, grant: &Grant) -> Value {
     })
 }
 
-fn find_pending<'a>(inner: &'a Inner, id: &str) -> Result<&'a Pending, Response> {
+fn find_pending<'a>(inner: &'a Inner, id: &str) -> Result<&'a Pending, Refusal> {
     inner
         .pending
         .iter()
@@ -1260,7 +1290,7 @@ fn find_pending<'a>(inner: &'a Inner, id: &str) -> Result<&'a Pending, Response>
         .ok_or_else(gone)
 }
 
-fn gone() -> Response {
+fn gone() -> Refusal {
     refused(
         StatusCode::NOT_FOUND,
         "gone",
@@ -1268,7 +1298,7 @@ fn gone() -> Response {
     )
 }
 
-fn internal() -> Response {
+fn internal() -> Refusal {
     refused(
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal",
@@ -1518,7 +1548,8 @@ async fn rules(State(oauth): State<Arc<OAuth>>, request: Request, next: Next) ->
             StatusCode::SERVICE_UNAVAILABLE,
             crate::approve_page::PAGE_CLOSED,
             why,
-        );
+        )
+        .into_response();
     }
     let path = request.uri().path().to_string();
     let for_clients = path.starts_with("/.well-known/")
@@ -1700,11 +1731,11 @@ async fn authorize(
 }
 
 /// The page's JSON body, `{id, ...}`.
-fn page_body(body: &[u8]) -> Result<Value, Response> {
+fn page_body(body: &[u8]) -> Result<Value, Refusal> {
     serde_json::from_slice::<Value>(body)
         .ok()
         .filter(|value| value.get("id").and_then(Value::as_str).is_some())
-        .ok_or_else(|| StatusCode::BAD_REQUEST.into_response())
+        .ok_or_else(|| Refusal::bare(StatusCode::BAD_REQUEST))
 }
 
 async fn consent_begin(State(oauth): State<Arc<OAuth>>, body: Bytes) -> Response {
@@ -1720,7 +1751,7 @@ async fn consent_approve(State(oauth): State<Arc<OAuth>>, body: Bytes) -> Respon
     let outcome = tokio::task::spawn_blocking(move || {
         let args = page_body(&body)?;
         let (Some(statement), Some(proof)) = (args["statement"].as_str(), args.get("proof")) else {
-            return Err(StatusCode::BAD_REQUEST.into_response());
+            return Err(Refusal::bare(StatusCode::BAD_REQUEST));
         };
         oauth.approve(args["id"].as_str().unwrap_or_default(), statement, proof)
     })
@@ -1737,11 +1768,11 @@ async fn consent_deny(State(oauth): State<Arc<OAuth>>, body: Bytes) -> Response 
     answer(outcome)
 }
 
-fn answer(outcome: Result<Result<Value, Response>, tokio::task::JoinError>) -> Response {
+fn answer(outcome: Result<Result<Value, Refusal>, tokio::task::JoinError>) -> Response {
     match outcome {
         Ok(Ok(value)) => Json(value).into_response(),
-        Ok(Err(response)) => response,
-        Err(_) => internal(),
+        Ok(Err(refusal)) => refusal.into_response(),
+        Err(_) => internal().into_response(),
     }
 }
 
@@ -1753,10 +1784,10 @@ async fn owner_clients(State(oauth): State<Arc<OAuth>>) -> Response {
 async fn owner_revoke(State(oauth): State<Arc<OAuth>>, body: Bytes) -> Response {
     let outcome = tokio::task::spawn_blocking(move || {
         let args: Value =
-            serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+            serde_json::from_slice(&body).map_err(|_| Refusal::bare(StatusCode::BAD_REQUEST))?;
         let id = args["clientId"]
             .as_str()
-            .ok_or_else(|| StatusCode::BAD_REQUEST.into_response())?;
+            .ok_or_else(|| Refusal::bare(StatusCode::BAD_REQUEST))?;
         oauth.revoke_client(id, "page")
     })
     .await;
@@ -1764,7 +1795,7 @@ async fn owner_revoke(State(oauth): State<Arc<OAuth>>, body: Bytes) -> Response 
 }
 
 /// The proof a terminal's request carries: the random part of the file it made in the state directory.
-fn local_proof(oauth: &OAuth, args: &Value) -> Result<(), Response> {
+fn local_proof(oauth: &OAuth, args: &Value) -> Result<(), Refusal> {
     let proof = args["proof"].as_str().unwrap_or_default();
     let shaped = proof.len() == crate::approve_page::LOCAL_PROOF_LEN
         && proof
@@ -1784,7 +1815,7 @@ fn local_proof(oauth: &OAuth, args: &Value) -> Result<(), Response> {
 async fn local_clients(State(oauth): State<Arc<OAuth>>, body: Bytes) -> Response {
     let outcome = tokio::task::spawn_blocking(move || {
         let args: Value =
-            serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+            serde_json::from_slice(&body).map_err(|_| Refusal::bare(StatusCode::BAD_REQUEST))?;
         local_proof(&oauth, &args)?;
         Ok(oauth.clients())
     })
@@ -1795,11 +1826,11 @@ async fn local_clients(State(oauth): State<Arc<OAuth>>, body: Bytes) -> Response
 async fn local_revoke(State(oauth): State<Arc<OAuth>>, body: Bytes) -> Response {
     let outcome = tokio::task::spawn_blocking(move || {
         let args: Value =
-            serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
+            serde_json::from_slice(&body).map_err(|_| Refusal::bare(StatusCode::BAD_REQUEST))?;
         local_proof(&oauth, &args)?;
         let id = args["clientId"]
             .as_str()
-            .ok_or_else(|| StatusCode::BAD_REQUEST.into_response())?;
+            .ok_or_else(|| Refusal::bare(StatusCode::BAD_REQUEST))?;
         oauth.revoke_client(id, "terminal")
     })
     .await;
