@@ -5274,6 +5274,157 @@ neither has been measured on the pool itself.
   Use the service network for a pool unless you have a reason not to. A GitHub Enterprise host or a package mirror on
   a private address cannot be reached from the service network.
 
+## Connecting GitHub from the approval page
+
+The steps above have you make the credential by hand. The approval page makes it for you instead (what still has to be
+wired to a pool is under "Not done yet" below): open
+`/approve/github` on the same address as the approval page and sign in with your passkey. The page offers three ways to
+connect an organisation. Each one ends in a *connection* (a "binding" in the verbs) that holds the organisation, the
+runner group, and the label sets you chose. You choose the label names; Arca does not add a prefix.
+
+Every credential GitHub hands over goes into the kernel's GitHub store, `<stateDir>/github/` (folder 0700, files 0600),
+and stays in the kernel process: the App's key, the sign-in grant, GitHub's tokens and the OAuth App's secret are never
+copied to a host, a runner or an assistant. One thing does leave: `github_runner_mint` answers one runner's
+just-in-time configuration, which is that runner's credential for one job, to **any caller with an `operator`
+token**, an assistant included. Whoever holds such a token can therefore make a runner in the connection's runner
+group and receive the jobs, and the secrets, of the repositories that group admits. Give operator tokens only to what
+you trust with those jobs (see "Not done yet" below).
+
+### What GitHub's permissions force
+
+GitHub has no permission for "one runner group". Whatever registers a runner can do everything GitHub puts under that
+permission:
+
+- **Organisation "Self-hosted runners": read and write** (the App mode). It covers registering runners with any
+  labels in any runner group, creating, changing and deleting runner groups, and removing runners. Whoever holds it can
+  make a runner that receives other repositories' jobs, and the secrets those jobs are given. It cannot read code.
+  Only an organisation **owner** can install an App that asks for it; when anyone else clicks, GitHub turns the click
+  into a request to the owners.
+- **Repository "Administration": read and write** is what a runner for one repository needs. It also covers the
+  repository's settings, collaborators, branch protection, deploy keys and deleting the repository. Arca does not ask
+  for it.
+- **OAuth scope `admin:org`** (the device-code mode) is the whole organisation administration of the person who
+  approves it. Arca uses it once and deletes it (below), but for those seconds it is that much.
+
+The push mode asks GitHub for nothing: you make the runner configurations yourself and send them to Arca.
+
+### Mode 1: connect with a code (device flow)
+
+The quickest. It needs a GitHub OAuth App that you, the operator, registered once (GitHub: your organisation's
+"Settings", "Developer settings", "OAuth Apps", "New OAuth App"; any homepage and callback address; tick "Enable Device
+Flow"). Give its client ID and a client secret to Arca once with `github_oauth_app_set` (`doctor` scope). The secret is
+kept in the store and never shown again.
+
+On the page, fill in the organisation, a runner group name (left empty, the organisation's default group is used, with a
+warning), the labels, and how many runners (1 to 50). Arca shows an eight-character code and the GitHub address
+(`github.com/login/device`). The person opens it, types the code, and approves. If the organisation restricts OAuth
+Apps, GitHub's screen shows a "Grant" (or "Request") button next to the organisation: an owner must press it on that
+same screen, or Arca's next step is refused and the page says so.
+
+Arca then uses the grant once, step by step, each step shown on the page and written to the audit log:
+
+1. asks GitHub for a runner registration token for the organisation;
+2. reads the runner groups, and creates the named group if it is missing (open to the organisation's private
+   repositories; change that on GitHub);
+3. registers each runner in that group with its own key pair, generated in the kernel. The private key never leaves
+   the store;
+4. deletes the grant (`DELETE /applications/{client_id}/grant`), whether the steps before it worked or not. Only
+   GitHub's 204 counts as deleted. Any other answer, a 404 included (GitHub's answer when it does not take the OAuth
+   App's client ID and secret, for example after the secret was rotated on GitHub and not in Arca), is shown as "NOT
+   deleted" with GitHub's status, and the person is sent to `https://github.com/settings/applications` to revoke Arca
+   by hand. The flow still ends Done when the runners were registered, and says the grant is still in place.
+
+What it leaves behind are **persistent** runners, each with its own credential. Know this: a persistent runner's
+credential works until the runner is removed on GitHub. A job that can read it can take it away and keep asking for
+jobs as that runner. Use this mode for repositories whose workflows you trust, and remove the runners on GitHub when
+you stop.
+
+### Mode 2: a GitHub App made for you (manifest flow)
+
+The page posts an App manifest to GitHub. The person sees GitHub's own "Create GitHub App" screen with everything
+filled in, presses Create, then picks the repositories on the install screen. The App asks for organisation
+"Self-hosted runners: read and write" and nothing else, has no webhook, and is private to the organisation. GitHub
+hands its private key to Arca's callback, which writes it to the store.
+
+After the install, Arca makes a runner group called `Arca runners` open to exactly the repositories picked (or adopts
+the group of that name if one exists). When GitHub's plan has no runner groups, it falls back to the default group and
+says so. Every runner is then minted just in time, one per job: `github_runner_mint` (or the signer's in-process call,
+`Signer::mint`) returns one ephemeral runner configuration and writes who asked, when, the labels, the runner group and,
+once known, the job. A runner for a scale set is minted only when GitHub says the scale set is in the connection's own
+runner group; another group's scale set is refused (`ScaleSetOutsideGroup`) and the refusal logs the group it is in.
+
+### Mode 3: you push the configurations (push mode)
+
+For those who will not give Arca any GitHub permission. The page makes a connection and shows an intake token once.
+Your own automation makes just-in-time runner configurations with GitHub's API
+(`POST /orgs/{org}/actions/runners/generate-jitconfig`) with your own credential, and sends each to Arca:
+
+```
+curl -X POST https://arca.example.com/github/intake/<connection> \
+  -H "Authorization: Bearer <intake token>" -H "Content-Type: application/json" \
+  -d '{"encodedJitConfig": "<from GitHub>", "labels": ["linux", "x64"]}'
+```
+
+Arca keeps each configuration for 24 hours (at most 1000 waiting) and gives each to one job. When none is waiting, a
+mint answers `Empty` and the pool waits.
+
+### Not done yet
+
+- **Device-code runners stay offline.** Their files (`.runner`, `.credentials`, `.credentials_rsaparams`) are in the
+  store and `Signer::runner_files` reads them, but no host and no pool template reads them yet. The runners are
+  registered on GitHub and stay offline until that is wired.
+- **The pool is not wired yet.** The runner pool's template does not call `Signer::mint` yet; until it does, App and
+  push connections mint only through `github_runner_mint`.
+- **Who may mint.** Any `operator` token may call `github_runner_mint` and receive a runner's credential (above). To
+  harden: the verb only for a token whose tool list names it, or the in-process call only.
+- **A restart while registering.** A kernel restart while a device-code connection is registering loses the flow
+  before the grant is deleted. Revoke Arca at `https://github.com/settings/applications` if a connection never reached
+  Done.
+- **Disconnect asks no confirmation on the page**, and `github_mint_job` takes any mint id.
+
+### Workflows
+
+So that a workflow keeps working when the pool is off, let a repository variable pick the runner:
+
+```yaml
+runs-on: ${{ vars.ARCA_RUNNER || 'ubuntu-latest' }}
+```
+
+Set `ARCA_RUNNER` on the repository or organisation to the label you chose. Unset it and the jobs go back to GitHub's
+own runners.
+
+### Disconnecting
+
+The page's "Disconnect" (or `github_disconnect`) ends a connection, and the audit log records it:
+
+- **App**: Arca uninstalls the App from the organisation and deletes its private key from the store. The App itself
+  stays on GitHub until you delete it; the page links to its "Advanced" settings, where "Delete GitHub App" is.
+  Uninstalling or deleting the App on GitHub yourself works too: the next mint finds out and marks the connection
+  revoked. A suspended installation marks it suspended until you lift it.
+- **Push**: the intake token and the waiting configurations are deleted.
+- **Device code**: the runners' credentials are deleted from the store, so they go offline. Remove them on GitHub
+  ("Settings", "Actions", "Runners") to clear them from the list.
+
+### The audit log
+
+`<stateDir>/github/audit.jsonl`, one JSON line per event, read with `github_audit` (optionally for one connection).
+It records every flow start, grant, runner registration, grant deletion, mint (minted or refused, with the reason),
+job attachment and disconnect, with the caller and the time. It holds no credential. It is rotated at 8 MiB to
+`audit.jsonl.1`.
+
+### Verbs
+
+| Verb | Scope | What it does |
+|------|-------|--------------|
+| `github_oauth_app_set` | doctor | Stores the OAuth App's client ID and secret for the device-code mode |
+| `github_connect` | operator | Starts a device-code connection; answers the code and the address |
+| `github_connect_status` | viewer | The steps of one device-code connection so far |
+| `github_bindings` | viewer | The connections, without credentials |
+| `github_audit` | viewer | The audit log |
+| `github_runner_mint` | operator | One just-in-time runner configuration for a connection's labels |
+| `github_mint_job` | operator | Records which job a minted runner took |
+| `github_disconnect` | operator | Ends a connection (above); destructive, so `confirm: false` refuses it |
+
 ## A pool of GitLab runners
 
 The shipped `gitlab-runner-pool` template is one virtual machine that runs the CI jobs of one GitLab, self-hosted or
@@ -6235,6 +6386,21 @@ The approval's audit line names the passkey and how it signed
 A spend, by either kind of key, with or without a request, is recorded as one line in `approval-nonces.jsonl` (its
 time and nonce). The spend's line names no key and no signers file, so which key approved is read from the approval's
 audit line, and an SSH spend has none.
+
+### The GitHub signer
+
+`cargo test -p arca --test github_signer` runs the GitHub connections against a fake GitHub (`tests/github/fake.rs`):
+the OAuth device flow, the REST calls, the Actions service's registration calls, the App calls (checking every App JWT
+against the App's key) and the scale-set calls, on one loopback server that checks every credential it is given. It
+covers the device-code connection end to end (polling that asks again when GitHub is busy and obeys `slow_down`; the
+grant used once, then deleted on success and on every failure, and a deletion GitHub does not confirm said plainly; the
+runners registered with their own keys in the chosen, the default or a new group; both registration flows; an
+organisation that restricts OAuth Apps; a declined sign-in; a refused runner), the manifest flow (one permission, the
+state checked, the key stored 0600, Arca's runner group made or adopted, the default group when the plan has none), the
+mint for the organisation and for a scale set of the connection's own group with its tokens kept (another group's
+scale set refused), an App suspended, uninstalled or deleted on GitHub, disconnecting, the push intake (its token, its
+labels, its HTTP route refusing browsers) and the audit log. The tests also check that no credential is in any file
+outside the private store's credential folders.
 
 ## Continuous integration
 

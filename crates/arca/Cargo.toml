@@ -30,7 +30,11 @@ arca-reconcile.workspace = true
 arca-store.workspace = true
 arca-watch.workspace = true
 regex.workspace = true
+reqwest.workspace = true
+rsa.workspace = true
+rustls.workspace = true
 rustix.workspace = true
+webpki-roots.workspace = true
 axum.workspace = true
 base64.workspace = true
 getrandom.workspace = true
@@ -52,7 +56,6 @@ rusqlite.workspace = true
 # The passkey tests sign with a software P-256 passkey.
 p256.workspace = true
 # The browser passkey test serves the page over https://localhost to a real Chromium.
-rustls.workspace = true
 tokio-rustls.workspace = true
 
 [lints]

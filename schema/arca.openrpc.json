@@ -11234,6 +11234,1110 @@
       "x-arca-writes": false
     },
     {
+      "name": "github_oauth_app_set",
+      "params": [
+        {
+          "name": "clientId",
+          "required": true,
+          "schema": {
+            "description": "The OAuth App's client ID.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._]+$",
+            "type": "string"
+          }
+        },
+        {
+          "name": "clientSecret",
+          "required": true,
+          "schema": {
+            "description": "The OAuth App's client secret. Never shown again.",
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "clientId": {
+              "type": "string"
+            },
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "ok",
+            "clientId"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "Set this node's GitHub OAuth App, which `github_connect` signs people in with: its client ID and client secret. Write-only: no verb, page, log or record shows the secret again. The App asks for the `admin:org` scope; Arca uses each grant once and then asks GitHub to delete it.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": false,
+      "x-arca-scope": "doctor",
+      "x-arca-writes": true
+    },
+    {
+      "name": "github_connect",
+      "params": [
+        {
+          "name": "labels",
+          "required": true,
+          "schema": {
+            "description": "The runners' labels, exactly as the person chose them: one to twenty, each 1 to 100 characters with no space or comma. None is added.",
+            "items": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "type": "array"
+          }
+        },
+        {
+          "name": "org",
+          "required": true,
+          "schema": {
+            "description": "The GitHub organisation's login, as in https://github.com/<org>.",
+            "maxLength": 39,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}$",
+            "type": "string"
+          }
+        },
+        {
+          "name": "runners",
+          "required": true,
+          "schema": {
+            "description": "How many runners to register, 1 to 50.",
+            "maximum": 50,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "group",
+          "required": false,
+          "schema": {
+            "description": "The runner group, by name. Made when the organisation has none of that name (open to its private repositories, public ones off). Absent: the organisation's default group.",
+            "maxLength": 100,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        {
+          "name": "namePrefix",
+          "required": false,
+          "schema": {
+            "description": "The start of each runner's name; -1, -2 and so on follow. Absent: arca-<a short id>.",
+            "maxLength": 50,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._-]+$",
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "account": {
+              "type": "string"
+            },
+            "binding": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "createdAt": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "createdBy": {
+              "type": "string"
+            },
+            "expiresAt": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "group": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "runners": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "state": {
+              "enum": [
+                "waitingForPerson",
+                "registering",
+                "done",
+                "failed"
+              ],
+              "type": "string"
+            },
+            "steps": {
+              "items": {
+                "properties": {
+                  "at": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "atText": {
+                    "type": "string"
+                  },
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "at",
+                  "atText",
+                  "ok",
+                  "text"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "userCode": {
+              "type": "string"
+            },
+            "verificationUri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "account",
+            "group",
+            "labels",
+            "runners",
+            "userCode",
+            "verificationUri",
+            "expiresAt",
+            "state",
+            "steps",
+            "binding",
+            "createdBy",
+            "createdAt"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "Connect a GitHub organisation's runners through GitHub's device flow. The answer carries a code and an address (github.com/login/device) for the person, who types the code there and authorises Arca once (scope admin:org). Arca then gets a registration token, puts the runner group in place (the named one, made when missing, or the default), registers the asked runners with the person's labels, each with its own key, and then asks GitHub to delete the grant; a deletion GitHub does not confirm is said plainly. Steps: `github_connect_status`; log: `github_audit`. The runners' credentials stay in Arca's private store.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": false,
+      "x-arca-scope": "operator",
+      "x-arca-writes": true
+    },
+    {
+      "name": "github_connect_status",
+      "params": [
+        {
+          "name": "id",
+          "required": true,
+          "schema": {
+            "description": "The id `github_connect` answered.",
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "account": {
+              "type": "string"
+            },
+            "binding": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "createdAt": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "createdBy": {
+              "type": "string"
+            },
+            "expiresAt": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "group": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "type": "string"
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "runners": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "state": {
+              "enum": [
+                "waitingForPerson",
+                "registering",
+                "done",
+                "failed"
+              ],
+              "type": "string"
+            },
+            "steps": {
+              "items": {
+                "properties": {
+                  "at": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "atText": {
+                    "type": "string"
+                  },
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "at",
+                  "atText",
+                  "ok",
+                  "text"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "userCode": {
+              "type": "string"
+            },
+            "verificationUri": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "account",
+            "group",
+            "labels",
+            "runners",
+            "userCode",
+            "verificationUri",
+            "expiresAt",
+            "state",
+            "steps",
+            "binding",
+            "createdBy",
+            "createdAt"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "Where a `github_connect` stands: waiting for the person, registering, done or failed, with every step in words as the person should read them. GitHub's own words in a step are data.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": true,
+      "x-arca-scope": "viewer",
+      "x-arca-writes": false
+    },
+    {
+      "name": "github_bindings",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "bindings": {
+              "items": {
+                "properties": {
+                  "account": {
+                    "type": "string"
+                  },
+                  "app": {
+                    "properties": {
+                      "clientId": {
+                        "type": "string"
+                      },
+                      "htmlUrl": {
+                        "type": "string"
+                      },
+                      "id": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "ownerId": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "slug": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "slug",
+                      "clientId",
+                      "htmlUrl",
+                      "ownerId"
+                    ],
+                    "type": "object"
+                  },
+                  "createdAt": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "createdBy": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "installation": {
+                    "properties": {
+                      "id": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "repositories": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "type": "array"
+                      },
+                      "repositorySelection": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "repositorySelection",
+                      "repositories"
+                    ],
+                    "type": "object"
+                  },
+                  "labelSets": {
+                    "items": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    },
+                    "type": "array"
+                  },
+                  "mode": {
+                    "enum": [
+                      "oauth",
+                      "app",
+                      "push"
+                    ],
+                    "type": "string"
+                  },
+                  "runnerGroup": {
+                    "properties": {
+                      "createdByArca": {
+                        "type": "boolean"
+                      },
+                      "id": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "warning": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name",
+                      "createdByArca"
+                    ],
+                    "type": "object"
+                  },
+                  "runners": {
+                    "items": {
+                      "properties": {
+                        "id": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "labels": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "name": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "name",
+                        "id",
+                        "labels"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "status": {
+                    "enum": [
+                      "awaitingInstall",
+                      "active",
+                      "suspended",
+                      "revoked"
+                    ],
+                    "type": "string"
+                  },
+                  "updatedAt": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "why": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "mode",
+                  "account",
+                  "status",
+                  "labelSets",
+                  "createdBy",
+                  "createdAt",
+                  "updatedAt"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "flows": {
+              "items": {
+                "properties": {
+                  "account": {
+                    "type": "string"
+                  },
+                  "binding": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "createdAt": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "createdBy": {
+                    "type": "string"
+                  },
+                  "expiresAt": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "group": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "labels": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "runners": {
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "state": {
+                    "enum": [
+                      "waitingForPerson",
+                      "registering",
+                      "done",
+                      "failed"
+                    ],
+                    "type": "string"
+                  },
+                  "steps": {
+                    "items": {
+                      "properties": {
+                        "at": {
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "atText": {
+                          "type": "string"
+                        },
+                        "ok": {
+                          "type": "boolean"
+                        },
+                        "text": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "at",
+                        "atText",
+                        "ok",
+                        "text"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "userCode": {
+                    "type": "string"
+                  },
+                  "verificationUri": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "id",
+                  "account",
+                  "group",
+                  "labels",
+                  "runners",
+                  "userCode",
+                  "verificationUri",
+                  "expiresAt",
+                  "state",
+                  "steps",
+                  "binding",
+                  "createdBy",
+                  "createdAt"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "bindings",
+            "flows"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "The GitHub organisations connected to this node: each one's id, mode (oauth, app or push), organisation, status, runner group, label sets and registered runners, and the device flows of the last day. Never a key, a grant, a token or a runner's credential.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": true,
+      "x-arca-scope": "viewer",
+      "x-arca-writes": false
+    },
+    {
+      "name": "github_audit",
+      "params": [
+        {
+          "name": "binding",
+          "required": false,
+          "schema": {
+            "description": "A GitHub connection's id, as `github_bindings` lists it.",
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        {
+          "name": "limit",
+          "required": false,
+          "schema": {
+            "description": "At most this many lines, the newest. Default 100.",
+            "maximum": 1000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "lines": {
+              "items": {
+                "properties": {
+                  "at": {
+                    "type": "integer"
+                  },
+                  "atText": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "at",
+                  "atText",
+                  "kind"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "lines"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "The GitHub signer's log, oldest first: every connection, registration, mint and grant deletion, with who asked, when, the organisation, runner group, labels, runner and outcome. Optionally of one connection, and at most `limit` lines (default 100, at most 1000).",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": true,
+      "x-arca-scope": "viewer",
+      "x-arca-writes": false
+    },
+    {
+      "name": "github_runner_mint",
+      "params": [
+        {
+          "name": "binding",
+          "required": true,
+          "schema": {
+            "description": "A GitHub connection's id, as `github_bindings` lists it.",
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        {
+          "name": "labels",
+          "required": true,
+          "schema": {
+            "description": "The runners' labels, exactly as the person chose them: one to twenty, each 1 to 100 characters with no space or comma. None is added.",
+            "items": {
+              "maxLength": 100,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "type": "array"
+          }
+        },
+        {
+          "name": "runnerName",
+          "required": true,
+          "schema": {
+            "description": "The runner's name on GitHub.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._-]+$",
+            "type": "string"
+          }
+        },
+        {
+          "name": "job",
+          "required": false,
+          "schema": {
+            "additionalProperties": false,
+            "properties": {
+              "jobId": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "jobName": {
+                "maxLength": 300,
+                "type": "string"
+              },
+              "repo": {
+                "description": "owner/name",
+                "maxLength": 200,
+                "minLength": 3,
+                "type": "string"
+              },
+              "runId": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "workflowRef": {
+                "maxLength": 500,
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "name": "scaleSetId",
+          "required": false,
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "workFolder",
+          "required": false,
+          "schema": {
+            "description": "The runner's work folder; _work when absent.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "encodedJitConfig": {
+              "type": "string"
+            },
+            "labels": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "mintId": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "runnerGroupId": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "runnerId": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "runnerName": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "mintId",
+            "runnerId",
+            "runnerName",
+            "runnerGroupId",
+            "labels",
+            "encodedJitConfig"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "One just-in-time runner configuration from a GitHub connection, for a runner launcher outside the kernel: the connection, a runner name and its labels (exactly one of the connection's label sets), and for a scale set its id. An App connection asks GitHub with the App's key, which never leaves Arca; a push connection hands out the oldest configuration the person's service sent with those labels. The answer's encodedJitConfig registers one runner for one job: give it only to the machine that runs it. Every call, refused ones too, is a line of `github_audit`.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": false,
+      "x-arca-scope": "operator",
+      "x-arca-writes": true
+    },
+    {
+      "name": "github_mint_job",
+      "params": [
+        {
+          "name": "job",
+          "required": true,
+          "schema": {
+            "additionalProperties": false,
+            "properties": {
+              "jobId": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "jobName": {
+                "maxLength": 300,
+                "type": "string"
+              },
+              "repo": {
+                "description": "owner/name",
+                "maxLength": 200,
+                "minLength": 3,
+                "type": "string"
+              },
+              "runId": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "workflowRef": {
+                "maxLength": 500,
+                "type": "string"
+              }
+            },
+            "required": [
+              "repo"
+            ],
+            "type": "object"
+          }
+        },
+        {
+          "name": "mintId",
+          "required": true,
+          "schema": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "ok": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "ok"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "Record which job a minted runner took (repository, run, job, workflow), as a line of `github_audit` beside its mint. A runner's job is not known when it is minted.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": false,
+      "x-arca-scope": "operator",
+      "x-arca-writes": true
+    },
+    {
+      "name": "github_disconnect",
+      "params": [
+        {
+          "name": "binding",
+          "required": true,
+          "schema": {
+            "description": "A GitHub connection's id, as `github_bindings` lists it.",
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        {
+          "name": "confirm",
+          "required": false,
+          "schema": {
+            "description": "Optional. Absent or true: the call runs as without it. False: the call is refused, nothing changes and no approval is spent. It is never part of what an approval binds.",
+            "type": "boolean"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "account": {
+              "type": "string"
+            },
+            "app": {
+              "properties": {
+                "clientId": {
+                  "type": "string"
+                },
+                "htmlUrl": {
+                  "type": "string"
+                },
+                "id": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "ownerId": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "slug",
+                "clientId",
+                "htmlUrl",
+                "ownerId"
+              ],
+              "type": "object"
+            },
+            "createdAt": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "createdBy": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "installation": {
+              "properties": {
+                "id": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "repositories": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "repositorySelection": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "repositorySelection",
+                "repositories"
+              ],
+              "type": "object"
+            },
+            "labelSets": {
+              "items": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "mode": {
+              "enum": [
+                "oauth",
+                "app",
+                "push"
+              ],
+              "type": "string"
+            },
+            "runnerGroup": {
+              "properties": {
+                "createdByArca": {
+                  "type": "boolean"
+                },
+                "id": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "warning": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "createdByArca"
+              ],
+              "type": "object"
+            },
+            "runners": {
+              "items": {
+                "properties": {
+                  "id": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "labels": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "id",
+                  "labels"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "status": {
+              "enum": [
+                "awaitingInstall",
+                "active",
+                "suspended",
+                "revoked"
+              ],
+              "type": "string"
+            },
+            "updatedAt": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "why": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "mode",
+            "account",
+            "status",
+            "labelSets",
+            "createdBy",
+            "createdAt",
+            "updatedAt"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "Disconnect a GitHub connection from Arca's side: an App is uninstalled from the organisation where GitHub lets it and its key is deleted; a push connection's token and waiting configurations are deleted; a signed-in connection's runner credentials are deleted (its runners stay listed on GitHub, offline, until removed there). Nothing is minted from it again. The answer says what was done and what is left for the person on GitHub.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": false,
+      "x-arca-scope": "operator",
+      "x-arca-writes": true
+    },
+    {
       "name": "os_update",
       "params": [],
       "result": {
