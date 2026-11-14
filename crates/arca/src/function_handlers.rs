@@ -289,6 +289,7 @@ fn function_view(config: &ServiceConfig, runner: &crate::function_run::FunctionR
             "set": function::secret_set(config, secret),
         })).collect::<Vec<_>>(),
         "links": config.links.iter().map(|link| json!({ "to": link.to, "port": link.port })).collect::<Vec<_>>(),
+        "internet": function.internet,
         "triggers": [{ "timer": { "everySeconds": function.every_seconds } }],
         "limits": {
             "seconds": function.seconds,

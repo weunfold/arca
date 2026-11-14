@@ -43,9 +43,9 @@ use crate::adoptions::AdoptionRecord;
 use crate::config::{self, NodeConfig};
 use crate::handlers::{
     ActionExecutor, ActionSlot, AlertsExport, AlertsHandler, AlertsPublished, ApprovalStatus,
-    Clock, JournalListHandler, MetricsExport, MetricsHandler, OntologyQuery, Published,
-    SAMPLE_INTERVAL, StatusHandler, Ticker, TokenListHandler, WatchHandler, new_sampler, now_ms,
-    plan_handlers_served, spawn_watcher,
+    Clock, JournalListHandler, MetricsExport, MetricsHandler, OntologyQuery, OsUpdateHandler,
+    OsUpdatePublished, Published, SAMPLE_INTERVAL, StatusHandler, Ticker, TokenListHandler,
+    WatchHandler, new_sampler, now_ms, plan_handlers_served, spawn_watcher,
 };
 use crate::kernel::Kernel;
 use crate::{Failure, Flags};
@@ -286,6 +286,7 @@ pub fn serve(flags: &Flags) -> Result<Option<Value>, Failure> {
         .map_err(|e| Failure::Runtime(e.to_string()))?;
 
     let published = Published::default();
+    let os_update = OsUpdatePublished::default();
     let alerts = AlertsPublished::default();
     let targets = CheckTargets {
         incus: cfg.incus.socket.clone(),
@@ -297,7 +298,8 @@ pub fn serve(flags: &Flags) -> Result<Option<Value>, Failure> {
     let ticker = Ticker::new(sampler, engine, published.clone(), alerts.clone())
         .with_checks(targets)
         .with_watch(Arc::clone(&watch))
-        .with_host_network(cfg.host_network.status.clone());
+        .with_host_network(cfg.host_network.status.clone())
+        .with_os_update(os_update.clone());
     spawn_sampler(ticker).map_err(|e| Failure::Runtime(e.to_string()))?;
 
     let reader = Arc::new(Mutex::new(reader));
@@ -356,6 +358,12 @@ pub fn serve(flags: &Flags) -> Result<Option<Value>, Failure> {
             "node_metrics",
             Arc::new(MetricsHandler {
                 published: published.clone(),
+            }),
+        )
+        .handle(
+            "os_update",
+            Arc::new(OsUpdateHandler {
+                published: os_update,
             }),
         )
         .handle("watch_report", watch)
@@ -458,6 +466,12 @@ pub fn serve(flags: &Flags) -> Result<Option<Value>, Failure> {
             Arc::new(crate::storage::StorageListHandler {
                 storage: Arc::clone(&storage),
             }),
+        )
+        .handle(
+            "instance_move_preflight",
+            Arc::new(crate::move_preflight::MovePreflightHandler::new(Arc::new(
+                cfg.clone(),
+            ))),
         )
         .handle(
             "snapshot_list",
