@@ -79,6 +79,11 @@ pub struct FakeState {
     pub group_create_refusal: Option<u16>,
     /// The runner groups' repositories, by group id.
     pub group_repositories: Vec<(u64, Value)>,
+    /// The organisation's scale sets: `(id, runner group id)`.
+    pub scale_sets: Vec<(u64, u64)>,
+    /// What the token poll answers before its usual answer, one entry a poll: `503` (an empty 503), `html` (a page
+    /// that is not JSON) or `slow_down` (GitHub's slow_down with a one-second interval).
+    pub poll_script: Vec<&'static str>,
 }
 
 pub struct Fake {
@@ -130,6 +135,8 @@ impl Fake {
             repositories: vec![(11, format!("{org}/web")), (12, format!("{org}/api"))],
             group_create_refusal: None,
             group_repositories: Vec::new(),
+            scale_sets: Vec::new(),
+            poll_script: Vec::new(),
         }));
         let router = Router::new()
             .fallback(serve)
@@ -275,6 +282,8 @@ async fn serve(State(state): State<Arc<Mutex<FakeState>>>, request: Request) -> 
     let status = StatusCode::from_u16(status).expect("a status");
     if answer.is_null() {
         status.into_response()
+    } else if let Some(text) = answer.as_str() {
+        (status, text.to_string()).into_response()
     } else {
         (status, axum::Json(answer)).into_response()
     }
@@ -417,6 +426,19 @@ fn answer(
                 }),
             )
         }
+        ("GET", p) if p.starts_with("/tenant/_apis/runtime/runnerscalesets/") => {
+            if auth != format!("bearer:{ADMIN}") || !query.contains("api-version=") {
+                return (401, message("Bad credentials"));
+            }
+            let id: u64 = p.trim_start_matches("/tenant/_apis/runtime/runnerscalesets/").parse().unwrap_or(0);
+            match s.scale_sets.iter().find(|(scale_set, _)| *scale_set == id) {
+                Some((id, group)) => (
+                    200,
+                    json!({ "id": id, "name": format!("set-{id}"), "runnerGroupId": group, "runnerGroupName": "g" }),
+                ),
+                None => (404, message("Not Found")),
+            }
+        }
         ("POST", p) if p.starts_with("/tenant/_apis/runtime/runnerscalesets/") && p.ends_with("/generatejitconfig") => {
             if auth != format!("bearer:{ADMIN}") || !query.contains("api-version=") {
                 return (401, message("Bad credentials"));
@@ -471,6 +493,13 @@ fn answer(
             if s.declined {
                 return (200, json!({ "error": "access_denied" }));
             }
+            if !s.poll_script.is_empty() {
+                return match s.poll_script.remove(0) {
+                    "503" => (503, Value::Null),
+                    "html" => (200, Value::String("<html>Unicorn!</html>".to_string())),
+                    _ => (200, json!({ "error": "slow_down", "interval": 1 })),
+                };
+            }
             if !s.authorized {
                 return (200, json!({ "error": "authorization_pending" }));
             }
@@ -482,8 +511,9 @@ fn answer(
             )
         }
         ("DELETE", p) if p == format!("/api/applications/{CLIENT_ID}/grant") => {
+            // GitHub answers 404, not 401, to client credentials it does not take.
             if auth != format!("basic:{CLIENT_ID}:{CLIENT_SECRET}") {
-                return (401, message("Bad credentials"));
+                return (404, message("Not Found"));
             }
             if body["access_token"] != GRANT {
                 return (422, message("Invalid access token"));

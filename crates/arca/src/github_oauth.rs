@@ -37,6 +37,8 @@ pub const OAUTH_SCOPE: &str = "admin:org";
 pub const RUNNER_VERSION: &str = "2.338.2";
 /// The most runners one connection registers.
 pub const MAX_RUNNERS: u32 = 50;
+/// Where a person revokes an OAuth App's grant on GitHub by hand.
+pub const REVOKE_URL: &str = "https://github.com/settings/applications";
 /// How long a finished flow stays listed.
 const FLOW_KEEP_MS: u64 = 24 * 60 * 60 * 1000;
 /// The words for an organisation that restricts OAuth Apps.
@@ -69,7 +71,7 @@ pub enum FlowState {
     WaitingForPerson,
     /// The grant arrived; the runners are being registered.
     Registering,
-    /// Every runner is registered and the grant is deleted.
+    /// Every runner is registered. A step says whether GitHub confirmed the grant deleted (only its 204 does).
     Done,
     /// It stopped; the last step says why.
     Failed,
@@ -276,6 +278,7 @@ impl Signer {
     /// Polls for the grant until it comes, the person declines or the code expires; then registers.
     async fn oauth_follow(&self, id: &str) {
         let Some(client_id) = self.oauth_client_id() else {
+            self.lock().device_codes.remove(id);
             self.fail(id, "This node's OAuth App was removed while waiting.".to_string());
             return;
         };
@@ -338,13 +341,24 @@ impl Signer {
                 self.audit(json!({ "kind": "oauthGranted", "flow": id, "scope": granted_scopes }));
                 let grant = Secret::new(token);
                 let outcome = self.oauth_register(id, &grant).await;
-                self.delete_grant(id, &client_id, &grant).await;
+                let deleted = self.delete_grant(id, &client_id, &grant).await;
                 match outcome {
                     Ok(connect) => {
-                        // The connection is logged once the grant is gone.
+                        // The connection is logged once the grant is gone (or known not to be).
                         self.audit(connect);
                         self.set_flow(id, |flow| flow.state = FlowState::Done);
-                        self.step(id, true, "Done. Arca holds no access to your organisation.".to_string());
+                        if deleted {
+                            self.step(id, true, "Done. Arca holds no access to your organisation.".to_string());
+                        } else {
+                            self.step(
+                                id,
+                                true,
+                                format!(
+                                    "Done: the runners are registered. The grant is still in place until you revoke \
+                                     it at {REVOKE_URL}."
+                                ),
+                            );
+                        }
                     }
                     Err(text) => self.fail(id, text),
                 }
@@ -375,6 +389,13 @@ impl Signer {
                     );
                     return;
                 }
+                // GitHub is busy or answered something that is not the flow's (a 5xx, a 429, a page that is not
+                // JSON): ask again, more slowly, as long as the code lives.
+                _ if answer.status >= 500 || answer.status == 429 || body.get("error").is_none() => {
+                    if answer.status == 429 {
+                        self.set_flow(id, |flow| flow.interval_ms += 5000);
+                    }
+                }
                 _ => {
                     self.lock().device_codes.remove(id);
                     self.fail(
@@ -387,18 +408,20 @@ impl Signer {
         }
     }
 
-    /// Deletes the grant, and says so.
-    async fn delete_grant(&self, id: &str, client_id: &str, grant: &Secret) {
+    /// Deletes the grant, and says so. `true` only when GitHub confirmed the deletion.
+    async fn delete_grant(&self, id: &str, client_id: &str, grant: &Secret) -> bool {
         let Some(secret) = self.oauth_client_secret() else {
             self.step(
                 id,
                 false,
-                "The grant could not be deleted: this node's OAuth App secret is gone. Revoke Arca under your GitHub \
-                 Settings, Applications, Authorized OAuth Apps."
-                    .to_string(),
+                format!(
+                    "The grant is NOT deleted: this Arca's OAuth App secret is gone. Arca can still act on your \
+                     organisation until you revoke it: open {REVOKE_URL}, select this Arca's app under Authorized OAuth \
+                     Apps, and press Revoke."
+                ),
             );
             self.audit(json!({ "kind": "grantDeleted", "flow": id, "ok": false, "why": "no client secret" }));
-            return;
+            return false;
         };
         let answer = self
             .inner
@@ -411,36 +434,56 @@ impl Signer {
             )
             .await;
         match answer {
-            Ok(answer) if answer.status == 204 || answer.status == 404 => {
+            // Only GitHub's 204 says the grant is gone. A 404 is what GitHub answers to client credentials it does not
+            // take (a mistyped or rotated OAuth App secret), so it is not a deletion.
+            Ok(answer) if answer.status == 204 => {
                 self.step(
                     id,
                     true,
                     "The grant is deleted on GitHub: Arca can no longer act on your organisation.".to_string(),
                 );
                 self.audit(json!({ "kind": "grantDeleted", "flow": id, "ok": true, "status": answer.status }));
+                true
             }
             Ok(answer) => {
                 let why = answer.why();
+                let hint = if answer.status == 404 {
+                    " GitHub did not take this Arca's OAuth App credentials; whoever looks after Arca should set the \
+                     App's current secret again."
+                } else {
+                    ""
+                };
                 self.step(
                     id,
                     false,
                     format!(
-                        "The grant could not be deleted ({why}). Revoke Arca yourself under your GitHub Settings, \
-                         Applications, Authorized OAuth Apps; the runners keep working."
+                        "The grant is NOT deleted: GitHub answered {} ({why}). Arca can still act on your organisation \
+                         until you revoke it: open {REVOKE_URL}, select this Arca's app under Authorized OAuth Apps, \
+                         and press Revoke. The runners keep working.{hint}",
+                        answer.status
                     ),
                 );
-                self.audit(json!({ "kind": "grantDeleted", "flow": id, "ok": false, "why": why }));
+                self.audit(json!({
+                    "kind": "grantDeleted",
+                    "flow": id,
+                    "ok": false,
+                    "status": answer.status,
+                    "why": why,
+                }));
+                false
             }
             Err(why) => {
                 self.step(
                     id,
                     false,
                     format!(
-                        "The grant could not be deleted ({why}). Revoke Arca yourself under your GitHub Settings, \
-                         Applications, Authorized OAuth Apps; the runners keep working."
+                        "The grant is NOT deleted: GitHub could not be reached ({why}). Arca can still act on your \
+                         organisation until you revoke it: open {REVOKE_URL}, select this Arca's app under Authorized \
+                         OAuth Apps, and press Revoke. The runners keep working."
                     ),
                 );
                 self.audit(json!({ "kind": "grantDeleted", "flow": id, "ok": false, "why": why }));
+                false
             }
         }
     }

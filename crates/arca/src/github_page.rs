@@ -167,7 +167,9 @@ pub fn view(ctx: &Ctx<'_>, query: &HashMap<String, String>) -> Response {
     let signer = ctx.signer;
     let mut body = String::from(
         "<h1>GitHub runners</h1><p>Connect a GitHub organisation, and its Actions jobs can run on this Arca. \
-         Arca keeps every GitHub credential to itself: never on a runner's machine, never shown to an assistant.</p>",
+         Arca keeps the App's key, the sign-in grant and GitHub's tokens to itself. Each runner's own configuration, its \
+         credential for one job, goes to the machine that runs it, and also to any assistant that holds an Arca \
+         operator token and asks for one.</p>",
     );
     let mut refresh = false;
     if let Some(flow) = query.get("flow").and_then(|id| signer.oauth_flow(id)) {

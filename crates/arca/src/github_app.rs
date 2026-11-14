@@ -144,6 +144,9 @@ pub enum MintRefused {
     Empty,
     /// An OAuth binding registered lasting runners and mints none.
     NotMintable,
+    /// The scale set is not in the connection's runner group: Arca mints only into the group made for the
+    /// repositories the person picked. `scale_set_group` is the group GitHub says the scale set is in.
+    ScaleSetOutsideGroup { scale_set: u64, scale_set_group: Option<u64>, group: Option<u64> },
     /// GitHub refused or did not answer. `retry` says whether the same call may succeed later as it is.
     GitHub { status: Option<u16>, why: String, retry: bool },
     Store(String),
@@ -159,6 +162,7 @@ impl MintRefused {
             Self::Suspended { .. } => "Suspended",
             Self::Empty => "Empty",
             Self::NotMintable => "NotMintable",
+            Self::ScaleSetOutsideGroup { .. } => "ScaleSetOutsideGroup",
             Self::GitHub { .. } => "GitHubRefused",
             Self::Store(_) => "StoreFailed",
         }
@@ -181,6 +185,12 @@ impl MintRefused {
             Self::NotMintable => {
                 "this connection registered lasting runners and mints none: use its runners' files".to_string()
             }
+            Self::ScaleSetOutsideGroup { scale_set, scale_set_group, group } => format!(
+                "scale set {scale_set} is in runner group {}, not this connection's runner group {}: Arca mints only \
+                 into the group made for the repositories the person picked",
+                scale_set_group.map_or_else(|| "unknown".to_string(), |id| id.to_string()),
+                group.map_or_else(|| "(none yet)".to_string(), |id| id.to_string()),
+            ),
             Self::GitHub { why, .. } | Self::Store(why) => why.clone(),
         }
     }
@@ -834,11 +844,16 @@ impl Signer {
                 line["outcome"] = json!("minted");
                 line["mintId"] = json!(mint_id);
                 line["runnerId"] = json!(minted.runner_id);
+                // The group the runner really joined (a scale set's own group, checked against the binding's).
+                line["runnerGroupId"] = json!(minted.runner_group_id);
             }
             Err(refused) => {
                 line["outcome"] = json!("refused");
                 line["refusal"] = json!(refused.code());
                 line["why"] = json!(refused.message());
+                if let MintRefused::ScaleSetOutsideGroup { scale_set_group, .. } = refused {
+                    line["scaleSetRunnerGroupId"] = json!(scale_set_group);
+                }
             }
         }
         self.audit(line);
@@ -883,9 +898,38 @@ impl Signer {
                 }
                 let work_folder = request.work_folder.clone().unwrap_or_else(|| "_work".to_string());
                 let http = &self.inner.http;
+                let group = binding.runner_group.as_ref().map(|group| group.id);
                 let (answer, config_key) = match request.scale_set_id {
                     Some(scale_set) => {
                         let connection = self.actions_connection(&binding.id).await?;
+                        // The admin token reaches every scale set of the organisation: mint only for one in this
+                        // binding's own runner group.
+                        let read = http
+                            .send(
+                                Method::GET,
+                                &format!(
+                                    "{}/_apis/runtime/runnerscalesets/{scale_set}?api-version={ACTIONS_API_VERSION}",
+                                    connection.service_url
+                                ),
+                                Auth::Bearer(&connection.admin_token),
+                                None,
+                            )
+                            .await
+                            .map_err(transport)?;
+                        if !read.ok() {
+                            if read.status == 401 {
+                                self.lock().actions.remove(&binding.id);
+                            }
+                            return Err(github(&read));
+                        }
+                        let scale_set_group = read.json().get("runnerGroupId").and_then(Value::as_u64);
+                        if group.is_none() || scale_set_group != group {
+                            return Err(MintRefused::ScaleSetOutsideGroup {
+                                scale_set,
+                                scale_set_group,
+                                group,
+                            });
+                        }
                         let answer = http
                             .send(
                                 Method::POST,
@@ -958,7 +1002,7 @@ impl Signer {
                         .and_then(Value::as_str)
                         .unwrap_or(&request.runner_name)
                         .to_string(),
-                    runner_group_id: binding.runner_group.as_ref().map(|group| group.id),
+                    runner_group_id: group,
                     labels,
                     encoded_jit_config: Secret::new(config),
                 })

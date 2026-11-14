@@ -599,7 +599,9 @@ async fn the_manifest_flow_makes_an_app_with_one_permission_and_mints_runners_fo
         other => panic!("labels outside the sets are refused: {other:?}"),
     }
 
-    // A scale set's runner: the Actions service connection is made once and kept.
+    // A scale set's runner: the Actions service connection is made once and kept, and only a scale set of the
+    // binding's own runner group gets one.
+    fake.with(|s| s.scale_sets = vec![(3, 20), (4, 7)]);
     let connection = signer.actions_connection(&binding.id).await.expect("a connection");
     assert_eq!(connection.service_url, format!("{}/tenant", fake.base));
     for name in ["scale-1", "scale-2"] {
@@ -611,6 +613,13 @@ async fn the_manifest_flow_makes_an_app_with_one_permission_and_mints_runners_fo
     }
     assert_eq!(fake.seen("POST", "/api/actions/runner-registration").len(), 1);
     assert_eq!(fake.with(|s| s.runners.last().unwrap()["scaleSet"].clone()), 3);
+    let runners = fake.with(|s| s.runners.len());
+    assert_eq!(
+        signer.mint(mint_request(&binding.id, "other-group", &["linux", "x64"], Some(4))).await.unwrap_err(),
+        MintRefused::ScaleSetOutsideGroup { scale_set: 4, scale_set_group: Some(7), group: Some(20) }
+    );
+    assert_eq!(fake.with(|s| s.runners.len()), runners, "no runner is made for another group's scale set");
+    assert!(fake.seen("POST", "/tenant/_apis/runtime/runnerscalesets/4/generatejitconfig").is_empty());
 
     let audit = signer.audit_log(None, 100);
     let kinds: Vec<&str> = audit.iter().map(|l| l["kind"].as_str().unwrap()).collect();
@@ -618,7 +627,7 @@ async fn the_manifest_flow_makes_an_app_with_one_permission_and_mints_runners_fo
         assert!(kinds.contains(&kind), "{kind} is logged: {kinds:?}");
     }
     let mints: Vec<&Value> = audit.iter().filter(|l| l["kind"] == "mint").collect();
-    assert_eq!(mints.len(), 6, "every mint is logged, refused ones too");
+    assert_eq!(mints.len(), 7, "every mint is logged, refused ones too");
     assert_eq!(mints[0]["outcome"], "refused");
     assert_eq!(mints[0]["refusal"], "NotInstalled");
     assert_eq!(mints[1]["outcome"], "minted");
@@ -626,6 +635,10 @@ async fn the_manifest_flow_makes_an_app_with_one_permission_and_mints_runners_fo
     assert_eq!(mints[1]["job"]["repo"], "acme/web");
     assert_eq!(mints[1]["labels"], json!(["x64", "linux"]));
     assert_eq!(mints[3]["refusal"], "LabelsNotAllowed");
+    assert_eq!(mints[4]["runnerGroupId"], 20);
+    assert_eq!(mints[4]["scaleSetId"], 3);
+    assert_eq!(mints[6]["refusal"], "ScaleSetOutsideGroup");
+    assert_eq!(mints[6]["scaleSetRunnerGroupId"], 7);
     for (path, text) in shown_files(&scratch.0) {
         assert_no_secret(&path.display().to_string(), &text);
     }
@@ -834,4 +847,59 @@ async fn a_device_flow_connection_mints_nothing() {
         signer.mint(mint_request("gh-nope", "x", &["linux"], None)).await.unwrap_err(),
         MintRefused::UnknownBinding
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_grant_github_does_not_confirm_deleted_is_said_plainly_with_where_to_revoke_it() {
+    let scratch = Scratch::new();
+    let fake = Fake::start("acme").await;
+    fake.with(|s| s.authorized = true);
+    let signer = Signer::open(&scratch.0, fake.endpoints(), clock())
+        .expect("the signer opens")
+        .with_runner_key_bits(1024);
+    // A rotated or mistyped secret: GitHub answers 404 to the deletion.
+    signer
+        .set_oauth_app(CLIENT_ID, &Secret::new("an-old-secret-0123456789"))
+        .expect("the OAuth App is set");
+
+    let flow = signer.oauth_start(request("acme", Some("ci-pool"), 1)).await.unwrap();
+    let done = settled(&signer, &flow.id).await;
+    assert_eq!(done.state, FlowState::Done, "{:#?}", done.steps);
+    assert!(!fake.with(|s| s.grant_deleted));
+    let texts: Vec<&str> = done.steps.iter().map(|step| step.text.as_str()).collect();
+    assert!(!texts.iter().any(|text| text.contains("The grant is deleted")), "{texts:#?}");
+    let refused = done.steps.iter().find(|step| step.text.contains("NOT deleted")).expect("said plainly");
+    assert!(!refused.ok);
+    assert!(refused.text.contains("404"), "{}", refused.text);
+    assert!(refused.text.contains(arca::github_oauth::REVOKE_URL), "{}", refused.text);
+    let last = done.steps.last().unwrap();
+    assert!(last.text.contains("still in place"), "{}", last.text);
+    assert!(!last.text.contains("holds no access"));
+    let line = signer
+        .audit_log(None, 100)
+        .into_iter()
+        .find(|line| line["kind"] == "grantDeleted")
+        .expect("the deletion is logged");
+    assert_eq!((line["ok"].clone(), line["status"].clone()), (json!(false), json!(404)));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_busy_github_is_asked_again_and_slow_down_is_obeyed_while_polling() {
+    let scratch = Scratch::new();
+    let fake = Fake::start("acme").await;
+    fake.with(|s| {
+        s.authorized = true;
+        s.poll_script = vec!["503", "html", "slow_down"];
+    });
+    let signer = signer(&scratch, &fake);
+    let started = Instant::now();
+    let flow = signer.oauth_start(request("acme", Some("ci-pool"), 1)).await.unwrap();
+    let done = settled(&signer, &flow.id).await;
+    assert_eq!(done.state, FlowState::Done, "{:#?}", done.steps);
+    assert_eq!(fake.seen("POST", "/web/login/oauth/access_token").len(), 4);
+    assert!(
+        started.elapsed() >= Duration::from_secs(1),
+        "the poll after slow_down waited GitHub's interval"
+    );
+    assert!(fake.with(|s| s.grant_deleted));
 }

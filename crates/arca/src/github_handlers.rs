@@ -1,5 +1,6 @@
-//! The MCP verbs of the GitHub signer. They start and read connections and read the audit log; none returns a key, a
-//! grant, a token or a runner's credential (see `crate::github_signer`).
+//! The MCP verbs of the GitHub signer. They start, read and end connections, mint runners and read the audit log. None
+//! returns a key, a grant or a token, but `github_runner_mint` returns a runner's just-in-time configuration, which is
+//! that runner's credential, to any caller with an `operator` token (see `crate::github_signer`).
 
 use std::sync::Arc;
 
