@@ -10966,6 +10966,12 @@
                                 "null"
                               ]
                             },
+                            "fitsWithoutSnapshots": {
+                              "type": [
+                                "boolean",
+                                "null"
+                              ]
+                            },
                             "headroomBytes": {
                               "type": [
                                 "integer",
@@ -11004,6 +11010,12 @@
                               ]
                             },
                             "neededBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "neededWithoutSnapshotsBytes": {
                               "type": [
                                 "integer",
                                 "null"

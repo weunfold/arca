@@ -1135,6 +1135,8 @@ fn instance_move_preflight_result() -> Value {
         ("measuredBytes", true, nullable(int())),
         ("headroomBytes", true, nullable(int())),
         ("neededBytes", true, nullable(int())),
+        ("neededWithoutSnapshotsBytes", false, nullable(int())),
+        ("fitsWithoutSnapshots", false, nullable(boolean())),
         ("sourcePool", true, nullable(string())),
         ("targetPool", true, nullable(string())),
         ("targetFreeBytes", true, nullable(int())),

@@ -923,7 +923,8 @@ fn snapshots_custom_volumes_and_host_folders_count_in_the_size_and_in_the_pendin
         "storage-pools/default/containers-snapshots/shop_web/snap0",
         2,
     );
-    rig.write("storage-pools/default/custom/shop_vol1", 1);
+    // shop does not set features.storage.volumes, so Incus keeps the volume in default: custom/default_vol1.
+    rig.write("storage-pools/default/custom/default_vol1", 1);
     let answer = rig.preflight(&["web", "api"]);
     let web = check(&answer["rows"][0], "size");
     let measure = &web["measure"];
@@ -1027,5 +1028,103 @@ fn an_optional_usb_or_hotplug_device_the_target_lacks_is_a_risk_and_a_required_o
         risks.contains("stick") && risks.contains("dongle"),
         "{risks}"
     );
+    rig.assert_only_reads();
+}
+
+/// The size check of `web` in `project`, mounting the custom volume `vol1` of pool `default`, whose 2 MiB are written at
+/// `custom/<folder>`, while `features` is the config of the project shop.
+fn volume_size(project: &str, features: Value, folder: &str) -> Value {
+    let mut source = Host::new(false, "203.0.113.10");
+    source.projects[1]["config"] = features;
+    let mut web = instance("web", "00:16:3e:00:00:01");
+    web["project"] = json!(project);
+    web["devices"]["vol"] =
+        json!({ "type": "disk", "pool": "default", "source": "vol1", "path": "/vol" });
+    source.instances.push(web);
+    source.profiles.push((
+        "default",
+        json!({ "name": "default", "description": "", "config": {}, "devices": {} }),
+    ));
+    let rig = Rig::new(source, Host::new(false, "203.0.113.20"));
+    let own = if project == "default" {
+        "web".to_string()
+    } else {
+        format!("{project}_web")
+    };
+    rig.write(&format!("storage-pools/default/containers/{own}/rootfs"), 1);
+    rig.write(&format!("storage-pools/default/custom/{folder}"), 2);
+    let answer = rig
+        .call(json!({ "instances": [{ "project": project, "name": "web" }], "target": "node-b" }));
+    rig.assert_only_reads();
+    check(&answer["rows"][0], "size").clone()
+}
+
+#[test]
+fn a_custom_volume_is_measured_where_incus_keeps_it_project_prefix_always_and_default_without_the_feature()
+ {
+    for (project, features, folder) in [
+        // The default project: Incus still prefixes, default_<name>.
+        ("default", json!({}), "default_vol1"),
+        // A project without features.storage.volumes keeps its volumes in default.
+        (
+            "shop",
+            json!({ "features.profiles": "true", "features.networks": "false" }),
+            "default_vol1",
+        ),
+        // A project with the feature keeps its own.
+        (
+            "shop",
+            json!({ "features.profiles": "true", "features.storage.volumes": "true" }),
+            "shop_vol1",
+        ),
+    ] {
+        let size = volume_size(project, features, folder);
+        assert_eq!(size["ok"], true, "{project} {folder}: {size:#}");
+        assert!(
+            size["measure"]["volumeBytes"]
+                .as_u64()
+                .is_some_and(|bytes| bytes >= 2 * MIB),
+            "{project} {folder}: {size:#}"
+        );
+        let detail = size["detail"].as_str().expect("detail");
+        assert!(
+            detail.contains(folder),
+            "the detail names the folder walked: {detail}"
+        );
+    }
+}
+
+#[test]
+fn snapshots_that_do_not_fit_leave_a_second_figure_that_says_it_fits_without_them() {
+    let mut target = Host::new(false, "203.0.113.20");
+    target.pools = vec![("default", "btrfs", 92 * MIB, 100 * MIB)];
+    let rig = Rig::new(Host::new(true, "203.0.113.10"), target);
+    rig.files("web", 4);
+    rig.write(
+        "storage-pools/default/containers-snapshots/shop_web/snap0",
+        5,
+    );
+    rig.write(
+        "storage-pools/default/containers-snapshots/shop_web/snap1",
+        5,
+    );
+    let answer = rig.preflight(&["web"]);
+    let size = check(&answer["rows"][0], "size");
+    let measure = &size["measure"];
+    assert_eq!(
+        size["ok"], false,
+        "the upper bound stays the answer: {size:#}"
+    );
+    let available = measure["availableBytes"].as_u64().expect("available");
+    assert!(measure["neededBytes"].as_u64().expect("needed") > available);
+    let without = measure["neededWithoutSnapshotsBytes"]
+        .as_u64()
+        .expect("without");
+    let own = measure["instanceBytes"].as_u64().expect("instance");
+    assert_eq!(without, own + own / 10);
+    assert!(without <= available, "{measure:#}");
+    assert_eq!(measure["fitsWithoutSnapshots"], true);
+    let detail = size["detail"].as_str().expect("detail");
+    assert!(detail.contains("fits without snapshots"), "{detail}");
     rig.assert_only_reads();
 }

@@ -436,10 +436,14 @@ fn human(bytes: u64) -> String {
 fn measure_path(path: &Path) -> Result<u64, String> {
     use std::os::unix::fs::MetadataExt;
     let cannot = |what: &Path, error: &std::io::Error| {
-        format!(
-            "the kernel's user cannot read {}: {error}; the size needs read access there (the Incus storage folders, and each host folder the instance mounts)",
-            what.display()
-        )
+        if error.kind() == std::io::ErrorKind::NotFound {
+            format!("{} is not there", what.display())
+        } else {
+            format!(
+                "the kernel's user cannot read {}: {error}; the size needs read access there (the Incus storage folders, and each host folder the instance mounts)",
+                what.display()
+            )
+        }
     };
     let top = std::fs::symlink_metadata(path).map_err(|error| cannot(path, &error))?;
     let taken = |meta: &std::fs::Metadata| {
@@ -491,7 +495,8 @@ fn is_mount_point(path: &Path) -> bool {
     }
 }
 
-/// The name Incus gives an object of `project` in a pool's folders: `<project>_<name>`, or `<name>` in `default`.
+/// The name Incus gives an instance of `project` in a pool's folders: `<project>_<name>`, or `<name>` in `default`. A
+/// custom volume is always prefixed, `default_` included (see [`Run::measure`]).
 fn stored(project: &str, name: &str) -> String {
     if project == "default" {
         name.to_string()
@@ -755,6 +760,10 @@ impl Run<'_> {
         measure["measuredBytes"] = json!(bytes);
         measure["headroomBytes"] = json!(headroom);
         measure["neededBytes"] = json!(needed);
+        // The same need without the snapshots, which are counted in full and so may make a false no-go.
+        let without = bytes.saturating_sub(parts.snapshots.unwrap_or(0));
+        let needed_without = without.saturating_add(without / 10);
+        measure["neededWithoutSnapshotsBytes"] = json!(needed_without);
         let pool = match pool {
             Ok(pool) => pool,
             Err(why) => {
@@ -807,6 +816,8 @@ impl Run<'_> {
             )
         };
         check.ok = needed <= available;
+        let fits_without = needed_without <= available;
+        measure["fitsWithoutSnapshots"] = json!(fits_without);
         check.detail = format!(
             "{said}; with 10% headroom it needs {}. {}'s pool {} has {} free, {pending_words} = {} available: {}",
             human(needed),
@@ -816,11 +827,19 @@ impl Run<'_> {
             human(available),
             if check.ok {
                 "it fits".to_string()
+            } else if fits_without {
+                format!(
+                    "{} needed > {} available, it does not fit with its snapshots counted in full; without them it needs {}, so it fits without snapshots (move it without them, or delete some first)",
+                    human(needed),
+                    human(available),
+                    human(needed_without)
+                )
             } else {
                 format!(
-                    "{} needed > {} available, it does not fit",
+                    "{} needed > {} available, it does not fit, and without its snapshots it still needs {}",
                     human(needed),
-                    human(available)
+                    human(available),
+                    human(needed_without)
                 )
             }
         );
@@ -977,13 +996,27 @@ impl Run<'_> {
                     ));
                     continue;
                 }
-                let base = pools.join(volume_pool).join("custom");
-                let prefixed = base.join(stored(project, source));
-                let volume_path = if std::fs::symlink_metadata(&prefixed).is_ok() {
-                    prefixed
+                // Incus keeps a custom volume at custom/<project>_<name>, `default_` included, in the instance's
+                // project only when that project sets features.storage.volumes, and in default otherwise.
+                let volume_project = if project != "default"
+                    && self
+                        .source
+                        .opt(&format!("/1.0/projects/{}", seg(project)))
+                        .and_then(|doc| {
+                            doc.get("config")
+                                .and_then(|config| text(config, "features.storage.volumes"))
+                                .map(|value| value == "true")
+                        })
+                        .unwrap_or(false)
+                {
+                    project
                 } else {
-                    base.join(source)
+                    "default"
                 };
+                let volume_path = pools
+                    .join(volume_pool)
+                    .join("custom")
+                    .join(format!("{volume_project}_{source}"));
                 let bytes = self.measure_volume(
                     &volume_path,
                     volume_pool,
@@ -991,7 +1024,11 @@ impl Run<'_> {
                     &format!("the custom volume {volume_pool}/{source}"),
                 )?;
                 volumes = volumes.saturating_add(bytes);
-                words.push(format!("the custom volume {source} {}", human(bytes)));
+                words.push(format!(
+                    "the custom volume {source} {} at {}",
+                    human(bytes),
+                    volume_path.display()
+                ));
             } else if source.starts_with('/') {
                 let bytes = measure_path(Path::new(source))?;
                 host_folders = host_folders.saturating_add(bytes);
