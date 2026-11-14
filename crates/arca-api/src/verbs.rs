@@ -83,7 +83,7 @@ impl Verb {
     }
 }
 
-static VERBS: [Verb; 77] = [
+static VERBS: [Verb; 78] = [
     Verb {
         name: "arca_status",
         summary: "Node status: the API version, the node id, the mode, the uptime, whether Incus answers and the last applied sequence number.",
@@ -903,7 +903,7 @@ static VERBS: [Verb; 77] = [
     },
     Verb {
         name: "function_create",
-        summary: "Create a function: an OCI image by digest that holds one program, run on a timer, each run one start of its own container, on its image's own root, with a time, a memory and a CPU limit. Only from a proposal the owner approved (action_propose), whose card shows the image and digest, the command, the timer, the limits, the names of its secrets and everything it may reach: the services of this node its links name, each on one tcp port, the private addresses this node's config names for it, and nothing else, no public address among them. It is created stopped; function_secret_set sets its secrets, and the timer runs it from then on.",
+        summary: "Create a function: an OCI image by digest that holds one program, run on a timer, each run one start of its own container, on its image's own root, with a time, a memory and a CPU limit. Only from a proposal the owner approved (action_propose), whose card shows the image and digest, the command, the timer, the limits, the names of its secrets and everything it may reach: the services of this node its links name, each on one tcp port, the private addresses this node's config names for it, and the internet only when the definition says internet: true. It is created stopped; function_secret_set sets its secrets, and the timer runs it from then on.",
         class: VerbClass::L,
         min_scope: Scope::Doctor,
         writes: true,
@@ -1057,7 +1057,7 @@ static VERBS: [Verb; 77] = [
     },
     Verb {
         name: "github_oauth_app_set",
-        summary: "Set this node's GitHub OAuth App, which `github_connect` signs people in with: its client ID and client secret. Write-only: no verb, page, log or record shows the secret again. The App asks for the `admin:org` scope; Arca uses each grant once and deletes it.",
+        summary: "Set this node's GitHub OAuth App, which `github_connect` signs people in with: its client ID and client secret. Write-only: no verb, page, log or record shows the secret again. The App asks for the `admin:org` scope; Arca uses each grant once and then asks GitHub to delete it.",
         class: VerbClass::L,
         min_scope: Scope::Doctor,
         writes: true,
@@ -1071,7 +1071,7 @@ static VERBS: [Verb; 77] = [
     },
     Verb {
         name: "github_connect",
-        summary: "Connect a GitHub organisation's runners through GitHub's device flow. The answer carries a code and an address (github.com/login/device): give both to the person, who types the code there and authorises Arca once (scope admin:org). Arca then gets one runner registration token, puts the runner group in place (the named one, made when missing; the default group when none is named), registers the asked number of runners with exactly the person's labels, each with its own key, and deletes the grant at once. Every step is shown by `github_connect_status` and logged in `github_audit`. The runners' credentials stay in Arca's private store; no verb returns them.",
+        summary: "Connect a GitHub organisation's runners through GitHub's device flow. The answer carries a code and an address (github.com/login/device) for the person, who types the code there and authorises Arca once (scope admin:org). Arca then gets a registration token, puts the runner group in place (the named one, made when missing, or the default), registers the asked runners with the person's labels, each with its own key, and then asks GitHub to delete the grant; a deletion GitHub does not confirm is said plainly. Steps: `github_connect_status`; log: `github_audit`. The runners' credentials stay in Arca's private store.",
         class: VerbClass::L,
         min_scope: Scope::Operator,
         writes: true,
@@ -1166,6 +1166,20 @@ static VERBS: [Verb; 77] = [
         cut: no_cut,
         params: github_disconnect_params,
         result: github_binding_record,
+    },
+    Verb {
+        name: "os_update",
+        summary: "The node's OS update state: the version, channel, check frequency, automatic updates, the last check and update, and the OS's own error kind and update-key trust. Read every 5 minutes; known is false on a node that is not Arca OS.",
+        class: VerbClass::L,
+        min_scope: Scope::Viewer,
+        writes: false,
+        destructive: false,
+        untrusted: true,
+        output_key: None,
+        summary_text: summary_os_update,
+        cut: no_cut,
+        params: os_update_params,
+        result: os_update_result,
     },
 ];
 
@@ -1839,6 +1853,10 @@ fn function_create_params_base() -> Value {
                 "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$", "type": "string" },
                 "type": "object"
             },
+            "internet": {
+                "description": "Whether the function may reach the internet: true lets its runs open connections to every public address, as a service can, and the owner's card says so. Left out or false, it opens no connection to a public address. The node's services stay closed to it but for its links either way.",
+                "type": "boolean"
+            },
             "image": {
                 "description": "The image, as <registry>/<repository> in lower case, such as registry.example/acme/relay. Arca pulls it without a credential.",
                 "maxLength": 255,
@@ -1893,6 +1911,7 @@ fn function_result() -> Value {
             ])),
         ),
         ("destinations", false, json!({ "type": "array" })),
+        ("internet", true, boolean()),
         ("triggers", true, json!({ "type": "array" })),
         ("limits", true, json!({ "type": "object" })),
         ("concurrency", true, bounded_int(1, 1)),
@@ -2326,6 +2345,18 @@ pub fn summary_status(v: &Value) -> String {
     )
 }
 
+/// A short line for a successful `os_update`: the version and channel, or that the node reports no update state.
+pub fn summary_os_update(v: &Value) -> String {
+    if v["known"].as_bool() != Some(true) {
+        return "this node does not report update state".to_string();
+    }
+    format!(
+        "OS {} on channel {}",
+        v["version"].as_str().unwrap_or("unknown"),
+        v["channel"].as_str().unwrap_or("unknown")
+    )
+}
+
 /// A short line for a successful `node_metrics`.
 pub fn summary_metrics(v: &Value) -> String {
     format!("host metrics for {} minute(s)", v["minutes"])
@@ -2737,6 +2768,48 @@ fn node_metrics_result() -> Value {
         ("minutes", true, int()),
         ("latest", true, nullable(host_sample())),
         ("mean", true, nullable(host_sample())),
+    ])
+}
+
+fn os_update_params() -> Value {
+    params(vec![])
+}
+
+fn os_update_result() -> Value {
+    let text = || nullable(string());
+    let ms = || nullable(int());
+    result(vec![
+        ("known", true, boolean()),
+        ("asOf", true, int()),
+        ("version", true, text()),
+        ("channel", true, text()),
+        ("checkFrequency", true, text()),
+        ("automatic", true, nullable(boolean())),
+        ("lastCheckAt", true, ms()),
+        ("lastSuccessAt", true, ms()),
+        ("lastUpdatedVersion", true, text()),
+        ("lastUpdatedAt", true, ms()),
+        ("needsReboot", true, nullable(boolean())),
+        ("pendingVersion", true, text()),
+        ("previousVersion", true, text()),
+        ("goodVersion", true, text()),
+        ("lastResult", true, text()),
+        ("lastReason", true, text()),
+        (
+            "lastErrorKind",
+            true,
+            nullable_enum(&["network", "parse", "signature", "trust", "other"]),
+        ),
+        (
+            "trust",
+            true,
+            nullable(result(vec![
+                ("embeddedCaFingerprint", true, text()),
+                ("presentedCaFingerprint", true, text()),
+                ("failures", true, nullable(at_least(0))),
+                ("escalated", true, nullable(boolean())),
+            ])),
+        ),
     ])
 }
 

@@ -12,8 +12,9 @@
 //! 4. each runner, registered with its own key pair made here, exactly as the runner's `config.sh` registers one: the
 //!    runner-admin call (`POST /actions/runners/register`) when GitHub says to use it, otherwise the Actions service's
 //!    agent call. Each runner's three files go into the signer's store, 0600;
-//! 5. the grant is deleted (`DELETE /applications/{client_id}/grant`, with the OAuth App's client ID and secret), on
-//!    success and on every failure after the grant arrived, and Arca keeps no copy of it.
+//! 5. Arca asks GitHub to delete the grant (`DELETE /applications/{client_id}/grant`, with the OAuth App's client ID
+//!    and secret), on success and on every failure after the grant arrived, and keeps no copy of it. Only GitHub's 204
+//!    counts as deleted; any other answer is shown to the person as NOT deleted, with where to revoke Arca by hand.
 //!
 //! Every step is a line the person sees (`github_oauth_status`, the page) and a line of the audit log. The runners stay
 //! registered and keep their own credentials; nothing that reaches the organisation is kept.
@@ -223,7 +224,8 @@ impl Signer {
             true,
             format!(
                 "Open {uri} and type the code {user_code}. GitHub will ask you to let Arca manage {} once \
-                 (admin:org): Arca uses it to register {} runner(s) and deletes it right after.",
+                 (admin:org): Arca uses it to register {} runner(s), then asks GitHub to delete it and shows you here \
+                 whether GitHub confirmed.",
                 request.account, request.runners
             ),
         );
@@ -483,10 +485,9 @@ impl Signer {
                     id,
                     false,
                     format!(
-                        "The grant is NOT deleted: GitHub answered {} ({why}). Arca can still act on your organisation \
-                         until you revoke it: open {REVOKE_URL}, select this Arca's app under Authorized OAuth Apps, \
-                         and press Revoke. The runners keep working.{hint}",
-                        answer.status
+                        "The grant is NOT deleted: {why}. Arca can still act on your organisation until you revoke \
+                         it: open {REVOKE_URL}, select this Arca's app under Authorized OAuth Apps, and press \
+                         Revoke.{hint}"
                     ),
                 );
                 self.audit(json!({
@@ -505,7 +506,7 @@ impl Signer {
                     format!(
                         "The grant is NOT deleted: GitHub could not be reached ({why}). Arca can still act on your \
                          organisation until you revoke it: open {REVOKE_URL}, select this Arca's app under Authorized \
-                         OAuth Apps, and press Revoke. The runners keep working."
+                         OAuth Apps, and press Revoke."
                     ),
                 );
                 self.audit(json!({ "kind": "grantDeleted", "flow": id, "ok": false, "why": why }));

@@ -15,7 +15,9 @@
 //!   holds no GitHub credential at all.
 //!
 //! The store is `<stateDir>/github`, mode 0700, every file in it 0600 and written by rename. No verb, page, log or journal
-//! returns a key, a grant, a token or a runner's credential; the binding records hold none. Every registration and every
+//! returns a key, a grant or a GitHub token, with two exceptions: `github_runner_mint` returns a runner's just-in-time
+//! configuration, which is that runner's credential, to any `operator` token, and the page shows a push connection's
+//! intake token once, when it is made. The binding records hold none. Every registration and every
 //! mint is a line of `<stateDir>/github/audit.jsonl`: who asked, when, for which binding, runner group and labels, and the
 //! outcome.
 

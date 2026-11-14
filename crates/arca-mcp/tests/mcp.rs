@@ -468,7 +468,8 @@ fn a_viewer_tools_list_omits_token_list_and_every_write_verb() {
             "instance_move_preflight",
             "github_connect_status",
             "github_bindings",
-            "github_audit"
+            "github_audit",
+            "os_update"
         ]
     );
 }

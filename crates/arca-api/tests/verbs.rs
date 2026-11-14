@@ -110,6 +110,7 @@ fn the_table_holds_the_initial_plan_alerts_postgres_and_ontology_verbs_in_order(
             "github_runner_mint",
             "github_mint_job",
             "github_disconnect",
+            "os_update",
         ]
     );
     assert_eq!(API_VERSION, "0.1.0");

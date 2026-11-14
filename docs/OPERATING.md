@@ -2142,6 +2142,33 @@ the failure reason. The failure and provenance fields are additions: `cpu.coresK
 `load.reason` and `memory.reason`. Every field the earlier schema carried keeps its name and meaning, and a local node's
 figures do not change.
 
+## OS update state: `os_update`
+
+`os_update` is a viewer read of the node's Arca OS update state. The sampler reads incus-osd's update document,
+`GET /os/1.0/system/update`, with the Secure Boot and TPM reading every 5 minutes, and the verb answers from that reading:
+it sends no request of its own. When the document's health names no current version, the same read also asks `GET /os/1.0`
+for `environment.os_version`. `node_metrics` stays the host metrics domain; the update state changes on a slower cadence
+and has its own contract.
+
+| Field | From |
+|---|---|
+| `known` | `false` when the update document could not be read: a plain Incus that answers 404, a failed read, or before the first read. Never an error. |
+| `asOf` | When the read ran, epoch milliseconds. |
+| `version` | `state.health.current_version`, else `environment.os_version` of `/os/1.0`. |
+| `channel`, `checkFrequency` | `config.channel` and `config.check_frequency`, verbatim (`6h`, `never`). |
+| `automatic` | `!config.auto_updates_off` (incus-osd omits the field when it is false). |
+| `lastCheckAt` | `state.last_check`, when it is a usable RFC 3339 time. |
+| `lastSuccessAt` | The check time of the newest check this kernel saw complete (the same memory the update alert uses). |
+| `lastUpdatedVersion`, `lastUpdatedAt` | The version a completed `… has been updated to version V` status named, kept only when it is a plain version token, and the check time read with it. |
+| `needsReboot`, `pendingVersion`, `previousVersion`, `goodVersion`, `lastResult`, `lastReason` | `state.needs_reboot` and `state.health.*`, verbatim. |
+| `lastErrorKind` | `state.last_error_kind` as the OS classified it: `network`, `parse`, `signature`, `trust` or `other`; `null` when absent or empty. The kernel never classifies an error. |
+| `trust` | `embeddedCaFingerprint`, `presentedCaFingerprint` (SHA-256, hex pairs joined by colons), `failures` and `escalated` from `state.embedded_ca_fingerprint`, `state.presented_ca_fingerprint`, `state.trust_failures` and `state.trust_escalated`; `null` when the OS reports none of them. |
+
+Every field is present, and `null` when unknown. The raw `state.last_error` text is never read, and the status text is not
+kept beyond the version token. `lastResult` and `lastReason` are the OS's own words, so the verb is marked `untrusted`.
+The canvas's Fleet view reads this verb on every configured host. The update server's newest version for a channel is not
+in the update document, so the view compares a node with the newest version reported on the fleet's own nodes.
+
 ## Starting, stopping and restarting instances
 
 `instance_start`, `instance_stop` and `instance_restart` take `{project, instance}` and change the power state of one
@@ -5737,7 +5764,7 @@ A kernel-mode node with the managed service network (`kernel.serviceCidr`) runs 
 
 | Verb | Who runs it | What it does |
 |------|-------------|--------------|
-| `function_create {name, image, digest, triggers, command?, env?, secrets?, links?, limits?}` | only an approved action proposal | Creates the function, stopped. Its timer runs it from then on. |
+| `function_create {name, image, digest, triggers, command?, env?, secrets?, links?, internet?, limits?}` | only an approved action proposal | Creates the function, stopped. Its timer runs it from then on. |
 | `function_remove {name}` | only an approved action proposal | Stops the run that is going, deletes the function with its secrets. Its lines in the run log are kept. |
 | `function_secret_set {name, key, value}` | a `doctor` token | Sets one of the secrets the definition names. Write-only. |
 | `function_list` | a `viewer` token | Every function, with its definition, which secrets are set, whether a run is going, and its newest run. |
@@ -5773,6 +5800,7 @@ action_propose { "action": "function_create", "args": {
 | `env` | Plain values by name, at most 32, each at most 160 characters. The card shows each whole. |
 | `secrets` | Names only, at most 16. See below. |
 | `links` | Services of this node the function may reach, each on one tcp port that service declares. At most 8. |
+| `internet` | Optional, `true` or `false` (the default). `true` lets its runs open connections to every public address, as a service can; see below. |
 | `triggers` | Exactly one, a timer: `everySeconds` from 10 to 86400. |
 | `limits` | `seconds` 1 to 900 (default 60), `memory` a size of at least 8MiB (default 128MiB), `cpu` 1 to 64 (default 1). |
 
@@ -5793,8 +5821,13 @@ and a default that rejects both ways:
 - a **private address** outside the node's services is opened exactly as a service's is: the node's config names it for
   the function's name (`kernel.serviceDestinations`), the proposal fills it in, and the card's `Private network` row
   shows it ([A service that may reach one private address](#a-service-that-may-reach-one-private-address));
-- **nothing else.** A service's rules end with one that lets everything else out to the internet. A function's do not:
-  it can open no connection to a public address. There is no setting for it in this build.
+- the **internet**, only when the definition says `"internet": true`. The rules then end with one allow of every
+  address outside the service network. The rejects before it are a service's: every private range, the node's own
+  addresses, and every service of this node but the linked ones stay closed. The card's `Internet` row says `Yes` and
+  that a run can send there whatever its program and its secrets hold. It is for a program whose work is a public API
+  (the CI analysis reads `api.github.com`): its host names change their addresses, so no rule can name them one by one;
+- **nothing else.** Without `internet`, a function's rules have no rule that lets everything else out: it can open no
+  connection to a public address.
 
 **One way out stays open, and the card says so.** The service network's own DNS answers a function, as it answers
 every instance there, and it asks the internet's name servers for a name it does not know. So a program can still

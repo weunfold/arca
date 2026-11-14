@@ -280,7 +280,7 @@ pub fn view(ctx: &Ctx<'_>, query: &HashMap<String, String>) -> Response {
         body.push_str(&format!(
             "<section><h2>Sign in with GitHub</h2><p>Arca shows a code; you type it on GitHub and allow Arca to \
              manage the organisation once (GitHub calls it admin:org). Arca uses that once to register the runners, \
-             each with its own key, and deletes it at once: nothing that reaches your organisation is kept.</p>\
+             each with its own key, then asks GitHub to delete it, and shows you whether GitHub confirmed.</p>\
              <form method=\"post\" action=\"{DEVICE_PATH}\">\
              <label for=\"d-org\">Organisation</label><input id=\"d-org\" name=\"org\" required maxlength=\"39\" placeholder=\"acme\">\
              <label for=\"d-group\">Runner group (empty: the default group)</label><input id=\"d-group\" name=\"group\" maxlength=\"100\">\
