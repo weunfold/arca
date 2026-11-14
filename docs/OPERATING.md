@@ -5126,13 +5126,16 @@ pool has a second mode, `registration` set to `registration-token`, in which it 
 What the pool does with it:
 
 - Each slot without a registration runs the runner's own `config.sh --unattended --replace` once, with the group,
-  the class's labels (GitHub adds `self-hosted`, `linux` and `x64` itself) and the name `<pool>-<slot>`, and not
-  `--ephemeral`. The token reaches config.sh as a file on `/run` that its container reads into
+  the class's labels (GitHub adds `self-hosted`, `linux` and `x64` itself) and the name
+  `<pool>-<the pool's id>-<slot>`, and not `--ephemeral`. The pool's id keeps two pools of one name in one
+  organisation from taking each other's runners (`--replace` replaces a runner of the same name). The token reaches config.sh as a file on `/run` that its container reads into
   `ACTIONS_RUNNER_INPUT_TOKEN`: it is on no command line, in no log and in no record of Docker's.
 - The runner's registration (`.runner`, `.credentials`, `.credentials_rsaparams`) is kept per slot in
   `/var/lib/arca-runner-pool/registered/<slot>`, a folder only root enters (0700; the files 0600). Each runner has its
   own credential, which can do nothing but connect that one runner.
-- The token is deleted once every slot is registered, or after an hour, when GitHub no longer takes it. A slot that
+- The token is deleted once every slot is registered, or an hour after the pool first saw it, when GitHub no longer
+  takes it. Arca keeps the secret's value and writes it into the machine again at every start: the same token written
+  again is as old as it was and is deleted without being tried, so the stored value need not be cleared. A slot that
   has its registration starts without one, also after a restart of the controller or of the machine. A refused token
   is said in `service_logs` with config.sh's own last lines (`config.sh did not register the runner ...`), and the
   slot tries again with backoff until the token is deleted; its whole output is in
@@ -5140,9 +5143,13 @@ What the pool does with it:
 - The pool asks GitHub's API nothing in this mode: it does not read the runner group, does not take stale runners
   off, and does not retire an idle runner to give its place to another class. So give every slot a place
   (`maxSlots` at least the number of slots): a persistent runner keeps its place.
-- To register a slot again (a runner removed on GitHub, a new group): remove its folder under
-  `/var/lib/arca-runner-pool/registered` and put a new token. A runner that stops before any job says so in
-  `service_logs` with this hint.
+- When GitHub no longer has a slot's registration (the runner was removed on GitHub, the pool was off for more than
+  14 days, after which GitHub drops a persistent runner, or another runner took its name), its runner says so as it
+  starts. The slot then clears its registration and says in `service_logs`: `GitHub no longer has the registration of
+  its runner ...`. To bring it back, drop a new token: `service_secret_set` of `GITHUB_REGISTRATION_TOKEN`, then
+  `instance_start`. Nothing is done inside the machine. Slots that still have their registration keep running.
+- `runnerGroup` is not the organisation's default group: `Default` is refused, as the `jit` mode refuses the default
+  group's id, unless the template sets `allowDefaultRunnerGroup`.
 
 **This mode keeps per-slot state between jobs.** The slot's runner is persistent: it takes job after job in the same
 container, beside the same Docker daemon, with the same work directory (`_work`), the same Docker layer cache, the

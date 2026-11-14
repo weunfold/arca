@@ -328,6 +328,12 @@ load_settings() {
       say "settings: runnerGroup is at most 100 characters"
       return 1
     }
+    # The default group is refused as in the jit mode, unless the settings say allowDefaultRunnerGroup: every
+    # repository that group admits could send its jobs to these runners.
+    if [ "${GROUP_NAME,,}" = default ] && [ "$ALLOW_DEFAULT_GROUP" != true ]; then
+      say "settings: runnerGroup is \"$GROUP_NAME\", the organisation's default runner group: every repository that group admits could send its jobs to this pool's runners. Create a runner group for this pool, limited to selected repositories and with public repositories off, and name it in runnerGroup"
+      return 1
+    fi
   fi
   [ -z "$repo" ] || GROUP_NAME=''
   MAX_SLOTS=$(setting .maxSlots)
@@ -769,6 +775,11 @@ line_time() {
 # a slice's peak cannot be set back while it runs.
 persistent_look() {
   local lines=$1 begun ended start end at peak cpu result seconds
+  # The runner has a session with GitHub: its registration holds, and the pause after failures ends.
+  if [ -z "$connected" ] && [[ $lines == *'Listening for Jobs'* ]]; then
+    connected=1
+    rm -f "$POOL_RUN/backoff" "$POOL_RUN/backoff-until"
+  fi
   begun=$(count_lines "$lines" 'Running job: ')
   ended=$(count_lines "$lines" 'Job .* completed with result: ')
   while [ "$recorded" -lt "$ended" ]; do
@@ -830,7 +841,13 @@ slot_register() {
   mkdir -p "$new"
   chmod 700 "$new"
   (umask 077 && tr -d ' \t\r\n' <"$(reg_token)" >"$copy")
-  case $(cat "$copy") in '' | *[!A-Za-z0-9._~+/=-]*)
+  if [ ! -s "$copy" ]; then
+    rm -f "$copy"
+    rm -rf "${new:?}"
+    REGISTER_ERROR='the registration token is empty (only spaces or line breaks)'
+    return 1
+  fi
+  case $(cat "$copy") in *[!A-Za-z0-9._~+/=-]*)
     rm -f "$copy"
     rm -rf "${new:?}"
     REGISTER_ERROR='the registration token has a character no GitHub token has'
@@ -874,8 +891,10 @@ slot_begin() {
   # A slot begun just as the controller was told to stop registers no runner.
   ! stopping || return 1
   if [ -n "$REG" ]; then
-    # Registration-token mode: the slot's one runner, registered once and kept.
-    name="$POOL_NAME-$slot"
+    # Registration-token mode: the slot's one runner, registered once and kept. Its name carries the pool's own id, as
+    # a just-in-time runner's does: config.sh --replace takes over a runner of the same name, and it must never take
+    # another pool's, whatever that pool is called.
+    name="$POOL_NAME-$POOL_ID-$slot"
     runner_id=''
     if ! registered "$slot"; then
       if ! slot_register "$slot"; then
@@ -908,7 +927,9 @@ slot_begin() {
       return 1
     fi
   fi
-  rm -f "$POOL_RUN/backoff" "$POOL_RUN/backoff-until"
+  # A just-in-time runner was registered, so GitHub took the credential: the pause after failures ends. A persistent
+  # runner has reached GitHub only once it listens for jobs (persistent_look).
+  [ -n "$REG" ] || rm -f "$POOL_RUN/backoff" "$POOL_RUN/backoff-until"
 
   # A fresh work directory and socket directory for this runner. The caches are the slot's own and are kept.
   rm -rf "${dir:?}/work" "${dir:?}/sock"
@@ -1038,7 +1059,7 @@ slot_cycle() {
   local slot=$1
   local class=${SLOT_CLASS[$slot]} dir runner daemon slice token name body jit runner_id tries state code
   local started busy_since='' job='' result='' peak cpu seconds finished cgroup updating='' layered='' home=() lines
-  local retired='' asked='' recorded=0 cpu_mark=0
+  local retired='' asked='' recorded=0 cpu_mark=0 connected=
   # A slot takes no signal. It reads the same line as the controller: a slot begun as the controller is told to stop
   # finds the stop at once.
   trap - TERM INT
@@ -1132,12 +1153,26 @@ slot_cycle() {
       record_job "$slot" "$finished" "${job:-unknown}" unknown "$seconds" "$peak" $((cpu - cpu_mark)) "$name"
       recorded=$((recorded + 1))
     fi
+    # What the runner said before it stopped, kept for the words below: the log goes with its container.
+    lines=$(docker logs "$runner" 2>&1)
     slot_reap "$slot"
+    case $lines in *'registration has been deleted'* | *'please re-configure'* | *'Not configured'*)
+      # GitHub no longer has this runner's registration: it was removed on GitHub, it had not connected for 14 days
+      # (GitHub then drops a persistent runner), or another runner took its name. The registration is cleared, so the
+      # slot registers again with the next registration token instead of starting a runner GitHub refuses.
+      lines=$(slot_registration "$slot")
+      rm -rf "${lines:?}"
+      lines=''
+      slot_failed "$slot" "GitHub no longer has the registration of its runner $name (removed on GitHub, offline for more than 14 days, or its name taken). The registration is cleared: the slot registers again with a new registration token (GITHUB_REGISTRATION_TOKEN, service_secret_set then instance_start)"
+      return 0
+      ;;
+    esac
+    lines=''
     if [ "$recorded" -gt 0 ]; then
       say "slot $slot ($class): its persistent runner $name stopped (exit $code) after $recorded jobs; it is started again with its registration"
       return 0
     fi
-    slot_failed "$slot" "its persistent runner $name stopped (exit $code) before it took a job. If its registration was removed on GitHub, remove $(slot_registration "$slot") inside the machine and put a new registration token in GITHUB_REGISTRATION_TOKEN"
+    slot_failed "$slot" "its persistent runner $name stopped (exit $code) before it took a job"
     [ -z "$layered" ] || [ "$updating" = finished ] || plain_home "A runner stopped before its first job with its files layered"
     return 0
   fi
@@ -1783,9 +1818,11 @@ reg_waiting() {
 }
 
 # Registration-token mode: the token is deleted once every slot has its registration, or once it has outlived
-# POOL_TOKEN_LIFE seconds, after which GitHub no longer takes it. Said once each time.
+# POOL_TOKEN_LIFE seconds, after which GitHub no longer takes it. Said once each time. Its age runs from when this pool
+# first saw that token, not from the file's time: Arca writes its stored secrets again at every start, and the same
+# token written again is as old as it was. What is kept is a digest of the token and that time, never the token.
 reg_token_done() {
-  local file age
+  local file age sum seen='' at=''
   file=$(reg_token)
   [ -e "$file" ] || return 0
   if all_registered; then
@@ -1793,7 +1830,15 @@ reg_token_done() {
     say "the registration token is deleted: every slot has its registration"
     return 0
   fi
-  age=$(($(now) - $(stat -c %Y "$file" 2>/dev/null || now)))
+  sum=$(tr -d ' \t\r\n' <"$file" | sha256sum | cut -c1-64)
+  { read -r seen at <"$POOL_STATE/regtoken-seen"; } 2>/dev/null || seen=''
+  case $at in '' | *[!0-9]*) seen='' ;; esac
+  if [ "$seen" != "$sum" ]; then
+    at=$(now)
+    (umask 077 && printf '%s %s\n' "$sum" "$at" >"$POOL_STATE/regtoken-seen.new") &&
+      mv "$POOL_STATE/regtoken-seen.new" "$POOL_STATE/regtoken-seen"
+  fi
+  age=$(($(now) - at))
   if [ "$age" -ge "$POOL_TOKEN_LIFE" ]; then
     rm -f "$file"
     say "the registration token is deleted: it is $age seconds old, and GitHub's last one hour"

@@ -64,11 +64,21 @@ parse_run() {
 }
 
 play_runner() {
-  local dir=$1 jit=$2 tools_mounted=$3 persistent=${4-} answer job seconds result
-  echo "Connected to GitHub" >>"$dir/log"
-  echo "Listening for Jobs" >>"$dir/log"
+  local dir=$1 jit=$2 tools_mounted=$3 persistent=${4-} answer job seconds result listening=''
+  # A just-in-time runner says it listens at once. A persistent one says so once GitHub has taken its registration,
+  # as the real runner does after it has made its session; one GitHub no longer has says what the real one says.
+  if [ -z "$persistent" ]; then
+    echo "Connected to GitHub" >>"$dir/log"
+    echo "Listening for Jobs" >>"$dir/log"
+  fi
   while [ -d "$dir" ]; do
     answer=$(printf '%s' "$jit" | "$FAKE_REAL_CURL" -sS -m 5 -X POST --data-binary @- "$FAKE_GITHUB/_fake/poll" 2>/dev/null) || answer=''
+    if [ -n "$persistent" ] && [ -z "$listening" ] && [ -n "$answer" ] &&
+      [ "$(printf '%s' "$answer" | jq -r '.gone // empty' 2>/dev/null)" != true ]; then
+      listening=1
+      echo "√ Connected to GitHub" >>"$dir/log"
+      echo "$(date -u '+%Y-%m-%d %H:%M:%S')Z: Listening for Jobs" >>"$dir/log"
+    fi
     if [ "$(printf '%s' "$answer" | jq -r '.update // empty' 2>/dev/null)" = true ]; then
       # GitHub wants a newer runner: the runner downloads it and replaces its own bin and externals directories.
       echo "Runner update in progress, do not shutdown runner." >>"$dir/log"
@@ -113,6 +123,10 @@ play_runner() {
       return
     fi
     if [ "$(printf '%s' "$answer" | jq -r '.gone // empty' 2>/dev/null)" = true ]; then
+      if [ -n "$persistent" ]; then
+        echo "Failed to create a session. The runner registration has been deleted from the server, please re-configure. Runner registrations are automatically deleted for runners that have not connected to the service recently." >>"$dir/log"
+        echo "Runner listener exit with terminated error, stop the service, no retry needed." >>"$dir/log"
+      fi
       end_play 1
       return
     fi
