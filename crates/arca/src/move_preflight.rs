@@ -428,64 +428,76 @@ fn human(bytes: u64) -> String {
     format!("{value:.1} {}", UNITS[unit])
 }
 
-/// What a walk of a storage folder found: the bytes it takes and how many entries could not be read.
-struct Measured {
-    bytes: u64,
-    unreadable: u64,
-}
-
-/// Walks `root` without following links, into nested file systems (a btrfs instance's nested subvolumes), and adds up the
-/// space each entry takes: a file's size or its blocks, whichever is larger (a compressed or deduplicated source takes
-/// fewer blocks than its copy will), and the blocks of everything else. A file with several links counts once. Nothing is
-/// read but names and sizes.
-fn walk(root: &Path) -> Result<Measured, String> {
+/// Measures `path` without following links: a file's size or its blocks, whichever is larger (a compressed or
+/// deduplicated source takes fewer blocks than its copy will), and for a folder the same for every entry under it, into
+/// nested file systems (a btrfs instance's nested subvolumes), with a file of several links counted once and the blocks of
+/// everything else. Nothing is read but names and sizes. The first entry the kernel's user cannot read or list makes the
+/// size not measured, with the reason.
+fn measure_path(path: &Path) -> Result<u64, String> {
     use std::os::unix::fs::MetadataExt;
-    let top = std::fs::symlink_metadata(root)
-        .ok()
-        .filter(std::fs::Metadata::is_dir)
-        .ok_or_else(|| {
-            format!(
-                "the storage folder {} cannot be read on this host",
-                root.display()
-            )
-        })?;
-    let mut out = Measured {
-        bytes: top.blocks().saturating_mul(512),
-        unreadable: 0,
+    let cannot = |what: &Path, error: &std::io::Error| {
+        format!(
+            "the kernel's user cannot read {}: {error}; the size needs read access there (the Incus storage folders, and each host folder the instance mounts)",
+            what.display()
+        )
     };
+    let top = std::fs::symlink_metadata(path).map_err(|error| cannot(path, &error))?;
+    let taken = |meta: &std::fs::Metadata| {
+        let blocks = meta.blocks().saturating_mul(512);
+        if meta.is_file() {
+            blocks.max(meta.len())
+        } else {
+            blocks
+        }
+    };
+    if top.is_file() {
+        return Ok(taken(&top));
+    }
+    if !top.is_dir() {
+        return Err(format!("{} is not a folder or a file", path.display()));
+    }
+    let mut bytes = taken(&top);
     let mut linked: HashSet<(u64, u64)> = HashSet::new();
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack = vec![path.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            out.unreadable += 1;
-            continue;
-        };
+        let entries = std::fs::read_dir(&dir).map_err(|error| cannot(&dir, &error))?;
         for entry in entries {
-            let Ok(entry) = entry else {
-                out.unreadable += 1;
-                continue;
-            };
-            let path = entry.path();
-            let Ok(meta) = std::fs::symlink_metadata(&path) else {
-                out.unreadable += 1;
-                continue;
-            };
+            let entry = entry.map_err(|error| cannot(&dir, &error))?;
+            let entry_path = entry.path();
+            let meta = std::fs::symlink_metadata(&entry_path)
+                .map_err(|error| cannot(&entry_path, &error))?;
             if !meta.is_dir() && meta.nlink() > 1 && !linked.insert((meta.dev(), meta.ino())) {
                 continue;
             }
-            let blocks = meta.blocks().saturating_mul(512);
-            let taken = if meta.is_file() {
-                blocks.max(meta.len())
-            } else {
-                blocks
-            };
-            out.bytes = out.bytes.saturating_add(taken);
+            bytes = bytes.saturating_add(taken(&meta));
             if meta.is_dir() {
-                stack.push(path);
+                stack.push(entry_path);
             }
         }
     }
-    Ok(out)
+    Ok(bytes)
+}
+
+/// Whether `path` is where a file system is mounted: its device is not its parent's. A zfs, lvm or ceph volume of a
+/// container is there only while Incus has it mounted.
+fn is_mount_point(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(parent) = path.parent() else {
+        return true;
+    };
+    match (std::fs::symlink_metadata(path), std::fs::metadata(parent)) {
+        (Ok(own), Ok(parent)) => own.is_dir() && own.dev() != parent.dev(),
+        _ => false,
+    }
+}
+
+/// The name Incus gives an object of `project` in a pool's folders: `<project>_<name>`, or `<name>` in `default`.
+fn stored(project: &str, name: &str) -> String {
+    if project == "default" {
+        name.to_string()
+    } else {
+        format!("{project}_{name}")
+    }
 }
 
 /// The instance's devices: expanded, or its own when Incus gave no expansion.
@@ -559,6 +571,17 @@ fn baseline(architecture: &str, flags: &BTreeSet<String>) -> Option<String> {
         4
     };
     Some(format!("x86-64-v{level}"))
+}
+
+/// What the size check measured, part by part. A part is `None` when the measuring stopped before it.
+#[derive(Default)]
+struct Parts {
+    path: Option<String>,
+    instance: Option<u64>,
+    snapshots: Option<u64>,
+    volumes: Option<u64>,
+    host_folders: Option<u64>,
+    risks: Vec<String>,
 }
 
 /// The pool of the target an instance would land on: its name and its document.
@@ -701,93 +724,32 @@ impl Run<'_> {
         pool: &Result<TargetPool, String>,
     ) -> Check {
         let mut check = Check::new("size");
-        let source_pool = Self::source_pool(instance);
-        let driver = source_pool
-            .as_deref()
-            .and_then(|pool| {
-                self.source
-                    .opt(&format!("/1.0/storage-pools/{}", seg(pool)))
-            })
-            .and_then(|doc| text(&doc, "driver").map(str::to_string));
         let mut measure = json!({
-            "method": null, "path": null, "measuredBytes": null, "headroomBytes": null, "neededBytes": null,
-            "sourcePool": source_pool, "targetPool": pool.as_ref().ok().map(|pool| pool.name.clone()),
+            "method": null, "path": null, "instanceBytes": null, "snapshotBytes": null, "volumeBytes": null,
+            "hostFolderBytes": null, "notMeasured": null, "measuredBytes": null, "headroomBytes": null,
+            "neededBytes": null, "sourcePool": Self::source_pool(instance),
+            "targetPool": pool.as_ref().ok().map(|pool| pool.name.clone()),
             "targetFreeBytes": null, "pendingBytes": 0, "pendingFor": [], "availableBytes": null,
         });
-        let measured: Result<(u64, String), String> = match (&source_pool, driver.as_deref()) {
-            (None, _) => Err("the instance has no root disk with a pool here".to_string()),
-            (Some(pool), Some("btrfs" | "dir")) => {
-                let folder = if text(instance, "type") == Some("virtual-machine") {
-                    "virtual-machines"
-                } else {
-                    "containers"
-                };
-                let stored = if project == "default" {
-                    name.to_string()
-                } else {
-                    format!("{project}_{name}")
-                };
-                let path = self
-                    .storage_root
-                    .join("storage-pools")
-                    .join(pool)
-                    .join(folder)
-                    .join(stored);
-                measure["method"] = json!("walked");
-                measure["path"] = json!(path.display().to_string());
-                match walk(&path) {
-                    Ok(found) if found.unreadable == 0 => Ok((
-                        found.bytes,
-                        format!(
-                            "measured {} ({} bytes) by walking {}",
-                            human(found.bytes),
-                            found.bytes,
-                            path.display()
-                        ),
-                    )),
-                    Ok(found) => Err(format!(
-                        "{} entries under {} could not be read, so the size is at least {} and not known: the kernel needs read access to the storage folder",
-                        found.unreadable,
-                        path.display(),
-                        human(found.bytes)
-                    )),
-                    Err(why) => Err(why),
-                }
-            }
-            (Some(pool), driver) => {
-                // On zfs, lvm and ceph Incus's figure is the driver's own allocation; only btrfs's leaves out shared data.
-                measure["method"] = json!("driver");
-                let usage = self
-                    .source
-                    .opt(&format!(
-                        "/1.0/instances/{}/state?project={}",
-                        seg(name),
-                        seg(project)
-                    ))
-                    .and_then(|state| state.pointer("/disk/root/usage").and_then(Value::as_u64));
-                let driver = driver.unwrap_or("unknown");
-                usage
-                    .map(|bytes| {
-                        (
-                            bytes,
-                            format!(
-                                "{} ({bytes} bytes) as the {driver} driver of pool {pool} counts it",
-                                human(bytes)
-                            ),
-                        )
-                    })
-                    .ok_or_else(|| format!("the {driver} pool {pool} gives no size for the instance"))
-            }
-        };
+        let mut parts = Parts::default();
+        let measured = self.measure(project, name, instance, pool, &mut parts);
+        measure["path"] = json!(parts.path);
+        measure["instanceBytes"] = json!(parts.instance);
+        measure["snapshotBytes"] = json!(parts.snapshots);
+        measure["volumeBytes"] = json!(parts.volumes);
+        measure["hostFolderBytes"] = json!(parts.host_folders);
+        check.risks.append(&mut parts.risks);
         let (bytes, said) = match measured {
             Ok(found) => found,
             Err(why) => {
                 check.ok = false;
-                check.detail = why;
+                check.detail = format!("not measured: {why}");
+                measure["notMeasured"] = json!(why);
                 check.extra.insert("measure".into(), measure);
                 return check;
             }
         };
+        measure["method"] = json!("walked");
         let headroom = bytes / 10;
         let needed = bytes.saturating_add(headroom);
         measure["measuredBytes"] = json!(bytes);
@@ -868,7 +830,74 @@ impl Run<'_> {
                 .or_default()
                 .push((label.to_string(), needed));
         }
-        let snapshots = self
+        check.extra.insert("measure".into(), measure);
+        check
+    }
+
+    /// The driver of this node's pool `pool`.
+    fn pool_driver(&self, pool: &str) -> Option<String> {
+        self.source
+            .opt(&format!("/1.0/storage-pools/{}", seg(pool)))
+            .and_then(|doc| text(&doc, "driver").map(str::to_string))
+    }
+
+    /// The bytes of one volume's folder at `path` on the pool `pool`: walked on btrfs and dir, walked on zfs, lvm and ceph
+    /// only where Incus has the volume mounted, and never Incus's own usage figure, which leaves out data a zfs clone
+    /// shares with its image. A virtual machine's disk on a block driver, and an unknown driver, are not measured.
+    fn measure_volume(&self, path: &Path, pool: &str, vm: bool, what: &str) -> Result<u64, String> {
+        match self.pool_driver(pool).as_deref() {
+            Some("btrfs" | "dir") => measure_path(path),
+            Some(driver @ ("zfs" | "lvm" | "ceph")) if !vm => {
+                if is_mount_point(path) {
+                    measure_path(path)
+                } else {
+                    Err(format!(
+                        "{what}'s {driver} volume is not mounted at {} (Incus mounts it while the container runs), and Incus's own usage figure leaves out data shared with the image, so it is not used",
+                        path.display()
+                    ))
+                }
+            }
+            Some(driver @ ("zfs" | "lvm" | "ceph")) => Err(format!(
+                "{what} is a virtual machine whose disk is a {driver} block volume this host cannot walk"
+            )),
+            driver => Err(format!(
+                "{what} is on pool {pool}, whose driver {} this check cannot measure (btrfs, dir, or a mounted zfs, lvm or ceph volume)",
+                driver.unwrap_or("unknown")
+            )),
+        }
+    }
+
+    /// Everything of the instance that lands on the target pool, measured on this host: its own volume, its snapshots,
+    /// each custom volume it mounts that is not on the target yet and lands on the same pool, and each host folder it
+    /// mounts (the proposal copies it into a custom volume there). Fills `parts`, and answers the total and its words.
+    fn measure(
+        &self,
+        project: &str,
+        name: &str,
+        instance: &Value,
+        pool: &Result<TargetPool, String>,
+        parts: &mut Parts,
+    ) -> Result<(u64, String), String> {
+        let label = format!("{project}/{name}");
+        let source_pool = Self::source_pool(instance)
+            .ok_or_else(|| "the instance has no root disk with a pool here".to_string())?;
+        let vm = text(instance, "type") == Some("virtual-machine");
+        let (folder, snapshot_folder) = if vm {
+            ("virtual-machines", "virtual-machines-snapshots")
+        } else {
+            ("containers", "containers-snapshots")
+        };
+        let pools = self.storage_root.join("storage-pools");
+        let path = pools
+            .join(&source_pool)
+            .join(folder)
+            .join(stored(project, name));
+        parts.path = Some(path.display().to_string());
+        let own = self.measure_volume(&path, &source_pool, vm, &label)?;
+        parts.instance = Some(own);
+        let mut words = vec![format!("the instance {} at {}", human(own), path.display())];
+
+        let listed = self
             .source
             .opt(&format!(
                 "/1.0/instances/{}/snapshots?project={}",
@@ -877,13 +906,115 @@ impl Run<'_> {
             ))
             .and_then(|list| list.as_array().map(Vec::len))
             .unwrap_or(0);
+        let snapshot_path = pools
+            .join(&source_pool)
+            .join(snapshot_folder)
+            .join(stored(project, name));
+        let walkable = matches!(
+            self.pool_driver(&source_pool).as_deref(),
+            Some("btrfs" | "dir")
+        );
+        let snapshots = match std::fs::symlink_metadata(&snapshot_path) {
+            Ok(_) if walkable => measure_path(&snapshot_path)?,
+            Err(error) if walkable && error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(format!(
+                    "the kernel's user cannot read {}: {error}; the size needs read access there (the Incus storage folders, and each host folder the instance mounts)",
+                    snapshot_path.display()
+                ));
+            }
+            _ if listed == 0 => 0,
+            _ if walkable => {
+                return Err(format!(
+                    "Incus lists {listed} snapshot(s) of {label}, but {} is not there",
+                    snapshot_path.display()
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "{label} has {listed} snapshot(s) on pool {source_pool}, which this host cannot walk"
+                ));
+            }
+        };
+        parts.snapshots = Some(snapshots);
         if snapshots > 0 {
-            check.risks.push(format!(
-                "{snapshots} snapshot(s) move with the instance and are not in the measured size"
-            ));
+            words.push(format!("its snapshots {}", human(snapshots)));
+            parts.risks.push(
+                "each snapshot is counted in full; snapshots that share data take less, so the need is an upper bound"
+                    .to_string(),
+            );
         }
-        check.extra.insert("measure".into(), measure);
-        check
+
+        let target_pool = pool.as_ref().ok().map(|pool| pool.name.as_str());
+        let (mut volumes, mut host_folders) = (0u64, 0u64);
+        for (device_name, device) in devices(instance) {
+            if text(&device, "type") != Some("disk") || is_root_disk(&device) {
+                continue;
+            }
+            let Some(source) = text(&device, "source") else {
+                continue;
+            };
+            let mount = text(&device, "path").unwrap_or("?");
+            if let Some(volume_pool) = text(&device, "pool") {
+                let on_target = self.target.is_some_and(|target| {
+                    target
+                        .found(&format!(
+                            "/1.0/storage-pools/{}/volumes/custom/{}?project={}",
+                            seg(volume_pool),
+                            seg(source),
+                            seg(project)
+                        ))
+                        .ok()
+                        .flatten()
+                        .is_some()
+                });
+                if on_target {
+                    continue;
+                }
+                if target_pool.is_some_and(|target_pool| target_pool != volume_pool) {
+                    parts.risks.push(format!(
+                        "the custom volume {volume_pool}/{source} ({device_name}) moves to {}'s pool {volume_pool}, which this check does not size",
+                        self.target_name
+                    ));
+                    continue;
+                }
+                let base = pools.join(volume_pool).join("custom");
+                let prefixed = base.join(stored(project, source));
+                let volume_path = if std::fs::symlink_metadata(&prefixed).is_ok() {
+                    prefixed
+                } else {
+                    base.join(source)
+                };
+                let bytes = self.measure_volume(
+                    &volume_path,
+                    volume_pool,
+                    false,
+                    &format!("the custom volume {volume_pool}/{source}"),
+                )?;
+                volumes = volumes.saturating_add(bytes);
+                words.push(format!("the custom volume {source} {}", human(bytes)));
+            } else if source.starts_with('/') {
+                let bytes = measure_path(Path::new(source))?;
+                host_folders = host_folders.saturating_add(bytes);
+                words.push(format!(
+                    "the host folder {source} at {mount} {}",
+                    human(bytes)
+                ));
+            }
+        }
+        parts.volumes = Some(volumes);
+        parts.host_folders = Some(host_folders);
+        let total = own
+            .saturating_add(snapshots)
+            .saturating_add(volumes)
+            .saturating_add(host_folders);
+        Ok((
+            total,
+            format!(
+                "measured {} ({total} bytes) by walking {}",
+                human(total),
+                words.join(", ")
+            ),
+        ))
     }
 
     fn storage_driver(&self, instance: &Value, pool: &Result<TargetPool, String>) -> Check {
@@ -1059,7 +1190,12 @@ impl Run<'_> {
         let resources = target.resources();
         for (device_name, device) in devices(instance) {
             let kind = text(&device, "type").unwrap_or("");
-            let optional = text(&device, "required") == Some("false");
+            // Incus makes a usb or unix-hotplug device optional unless it says `required=true`, and every other device
+            // required unless it says `required=false`.
+            let optional = match kind {
+                "usb" | "unix-hotplug" => text(&device, "required") != Some("true"),
+                _ => text(&device, "required") == Some("false"),
+            };
             match kind {
                 "gpu" => {
                     let keys = [
@@ -1101,7 +1237,7 @@ impl Run<'_> {
                         )
                     });
                 }
-                "unix-char" | "unix-block" | "unix-hotplug" => {
+                "unix-char" | "unix-block" => {
                     let path = text(&device, "source")
                         .or_else(|| text(&device, "path"))
                         .unwrap_or("");
@@ -1233,8 +1369,8 @@ impl Run<'_> {
                         ));
                     }
                 }
-                "usb" | "pci" => {
-                    let (list, keys): (&str, &[(&str, &str)]) = if kind == "usb" {
+                "usb" | "unix-hotplug" | "pci" => {
+                    let (list, keys): (&str, &[(&str, &str)]) = if kind != "pci" {
                         (
                             "/usb/devices",
                             &[("vendorid", "/vendor_id"), ("productid", "/product_id")],
@@ -2062,6 +2198,16 @@ mod tests {
             Some("x86-64-v4")
         );
         assert_eq!(baseline("aarch64", &flags(&v4)), None);
+    }
+
+    #[test]
+    fn a_mount_point_is_a_folder_on_another_device_than_its_parent() {
+        assert!(is_mount_point(Path::new("/proc")));
+        let dir = std::env::temp_dir().join(format!("arca-mount-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("inner")).expect("dir");
+        assert!(!is_mount_point(&dir.join("inner")));
+        assert!(!is_mount_point(&dir.join("missing")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

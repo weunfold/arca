@@ -258,6 +258,8 @@ struct Store {
     /// The network cards a running instance reports in its live state, by project and name, set by
     /// [`FakeIncus::set_live_network`]: in place of the cards the fake makes from its devices and leases.
     live: BTreeMap<(String, String), Value>,
+    /// The root disk usage, in bytes, an instance reports in its state, by project and name.
+    disk_usage: BTreeMap<(String, String), u64>,
 }
 
 /// One DHCP lease: the network, the MAC that holds it and its address, and whether a device's `ipv4.address` pinned it.
@@ -410,6 +412,7 @@ impl Shared {
             hung: BTreeMap::new(),
             usage: BTreeMap::new(),
             live: BTreeMap::new(),
+            disk_usage: BTreeMap::new(),
         };
         for index in 0..store.objects.len() {
             store.expand(index, false);
@@ -787,6 +790,19 @@ impl FakeIncus {
             (project.to_string(), name.to_string()),
             (cpu_ns, memory_bytes),
         );
+    }
+
+    /// Sets the root disk usage, in bytes, the instance `name` in `project` reports in its `state` as `disk.root.usage`, as
+    /// Incus reads it from the storage driver. Panics when no such instance is held. It records no write.
+    pub fn set_root_disk_usage(&self, project: &str, name: &str, bytes: u64) {
+        let mut store = lock(&self.shared.store);
+        assert!(
+            store.instance_held(project, name),
+            "no instance {project}/{name} to set the disk usage of"
+        );
+        store
+            .disk_usage
+            .insert((project.to_string(), name.to_string()), bytes);
     }
 
     /// Sets the network cards the running instance `name` in `project` reports in its live state, as a guest's agent does:
@@ -3350,13 +3366,20 @@ fn instance_state(store: &Store, address: &Address) -> Answer {
         .copied()
         .filter(|_| running)
         .unwrap_or((0, 0));
-    sync(json!({
+    let mut state = json!({
         "status": status,
         "status_code": if running { 103 } else { 102 },
         "network": network,
         "cpu": { "usage": cpu_ns },
         "memory": { "usage": memory },
-    }))
+    });
+    if let Some(bytes) = store
+        .disk_usage
+        .get(&(object.project.clone(), object.name.clone()))
+    {
+        state["disk"] = json!({ "root": { "usage": bytes } });
+    }
+    sync(state)
 }
 
 /// Rebuilds a stopped instance's root from an image, as an operation, and records which image the request named: the

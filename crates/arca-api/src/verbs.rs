@@ -1125,8 +1125,13 @@ fn instance_move_preflight_result() -> Value {
         ("proposal", true, nullable(string())),
     ]);
     let measure = result(vec![
-        ("method", true, nullable_enum(&["walked", "driver"])),
+        ("method", true, nullable_enum(&["walked"])),
         ("path", true, nullable(string())),
+        ("instanceBytes", true, nullable(int())),
+        ("snapshotBytes", true, nullable(int())),
+        ("volumeBytes", true, nullable(int())),
+        ("hostFolderBytes", true, nullable(int())),
+        ("notMeasured", true, nullable(string())),
         ("measuredBytes", true, nullable(int())),
         ("headroomBytes", true, nullable(int())),
         ("neededBytes", true, nullable(int())),

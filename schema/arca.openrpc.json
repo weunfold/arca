@@ -10972,6 +10972,18 @@
                                 "null"
                               ]
                             },
+                            "hostFolderBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "instanceBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
                             "measuredBytes": {
                               "type": [
                                 "integer",
@@ -10982,8 +10994,7 @@
                               "anyOf": [
                                 {
                                   "enum": [
-                                    "walked",
-                                    "driver"
+                                    "walked"
                                   ],
                                   "type": "string"
                                 },
@@ -10995,6 +11006,12 @@
                             "neededBytes": {
                               "type": [
                                 "integer",
+                                "null"
+                              ]
+                            },
+                            "notMeasured": {
+                              "type": [
+                                "string",
                                 "null"
                               ]
                             },
@@ -11013,6 +11030,12 @@
                               },
                               "type": "array"
                             },
+                            "snapshotBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
                             "sourcePool": {
                               "type": [
                                 "string",
@@ -11030,11 +11053,22 @@
                                 "string",
                                 "null"
                               ]
+                            },
+                            "volumeBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
                             }
                           },
                           "required": [
                             "method",
                             "path",
+                            "instanceBytes",
+                            "snapshotBytes",
+                            "volumeBytes",
+                            "hostFolderBytes",
+                            "notMeasured",
                             "measuredBytes",
                             "headroomBytes",
                             "neededBytes",

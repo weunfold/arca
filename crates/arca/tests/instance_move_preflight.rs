@@ -832,3 +832,200 @@ fn every_answer_conforms_to_the_verb_tables_result_schema() {
     }
     rig.assert_only_reads();
 }
+
+impl Rig {
+    /// Writes `mib` MiB of files under `relative`, a folder under the source's own folder.
+    fn write(&self, relative: &str, mib: u64) {
+        write_mib(&self.dir.join("source").join(relative), mib);
+    }
+}
+
+fn write_mib(folder: &Path, mib: u64) {
+    fs::create_dir_all(folder).expect("folder");
+    for index in 0..mib {
+        fs::write(
+            folder.join(format!("blob-{index}")),
+            vec![7u8; MIB as usize],
+        )
+        .expect("blob");
+    }
+}
+
+#[test]
+fn a_zfs_instance_is_never_sized_from_incus_usage_and_an_unmounted_dataset_is_not_measured() {
+    // Incus says 1 MiB (the data the dataset holds apart from its image's clone); the files are 4 MiB, and the folder
+    // is not where a mounted dataset is.
+    let mut source = Host::new(true, "203.0.113.10");
+    source.pools = vec![("default", "zfs", 0, 100 * MIB)];
+    let mut target = Host::new(false, "203.0.113.20");
+    target.pools = vec![("default", "zfs", 92 * MIB, 100 * MIB)];
+    let rig = Rig::new(source, target);
+    rig.files("web", 4);
+    rig.source.set_root_disk_usage("shop", "web", MIB);
+    let answer = rig.preflight(&["web"]);
+    let row = &answer["rows"][0];
+    let size = check(row, "size");
+    assert_eq!(
+        size["ok"], false,
+        "a zfs size is not taken from Incus: {size:#}"
+    );
+    assert_eq!(row["go"], false);
+    assert_eq!(size["measure"]["measuredBytes"], Value::Null, "{size:#}");
+    let detail = size["detail"].as_str().expect("detail");
+    assert!(
+        detail.contains("not measured") && detail.contains("not mounted"),
+        "{detail}"
+    );
+    assert!(
+        size["measure"]["notMeasured"]
+            .as_str()
+            .is_some_and(|why| why.contains("not mounted")),
+        "{size:#}"
+    );
+    rig.assert_only_reads();
+    drop(rig);
+
+    // A driver the verb does not know is never sized from Incus either.
+    let mut source = Host::new(true, "203.0.113.10");
+    source.pools = vec![("default", "fancyfs", 0, 100 * MIB)];
+    let rig = Rig::new(source, Host::new(false, "203.0.113.20"));
+    rig.files("web", 1);
+    rig.source.set_root_disk_usage("shop", "web", MIB);
+    let answer = rig.preflight(&["web"]);
+    let size = check(&answer["rows"][0], "size");
+    assert_eq!(size["ok"], false, "{size:#}");
+    let detail = size["detail"].as_str().expect("detail");
+    assert!(
+        detail.contains("not measured") && detail.contains("fancyfs"),
+        "{detail}"
+    );
+    rig.assert_only_reads();
+}
+
+#[test]
+fn snapshots_custom_volumes_and_host_folders_count_in_the_size_and_in_the_pending_sum() {
+    let host_folder = std::env::temp_dir().join(format!(
+        "arca-move-preflight-hostdata-{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::SeqCst)
+    ));
+    write_mib(&host_folder, 1);
+    let mut source = Host::new(true, "203.0.113.10");
+    source.instances[0]["devices"]["data"] =
+        json!({ "type": "disk", "source": host_folder, "path": "/data" });
+    source.instances[0]["devices"]["vol"] =
+        json!({ "type": "disk", "pool": "default", "source": "vol1", "path": "/vol" });
+    source.instances.push(instance("api", "00:16:3e:00:00:02"));
+    let rig = Rig::new(source, Host::new(false, "203.0.113.20"));
+    rig.files("web", 4);
+    rig.files("api", 1);
+    rig.write(
+        "storage-pools/default/containers-snapshots/shop_web/snap0",
+        2,
+    );
+    rig.write("storage-pools/default/custom/shop_vol1", 1);
+    let answer = rig.preflight(&["web", "api"]);
+    let web = check(&answer["rows"][0], "size");
+    let measure = &web["measure"];
+    let part = |key: &str| {
+        measure[key]
+            .as_u64()
+            .unwrap_or_else(|| panic!("{key}: {measure:#}"))
+    };
+    assert!(part("instanceBytes") >= 4 * MIB, "{measure:#}");
+    assert!(part("snapshotBytes") >= 2 * MIB, "{measure:#}");
+    assert!(part("volumeBytes") >= MIB, "{measure:#}");
+    assert!(part("hostFolderBytes") >= MIB, "{measure:#}");
+    let measured = part("measuredBytes");
+    assert_eq!(
+        measured,
+        part("instanceBytes")
+            + part("snapshotBytes")
+            + part("volumeBytes")
+            + part("hostFolderBytes")
+    );
+    assert_eq!(part("neededBytes"), measured + measured / 10);
+    assert_eq!(web["ok"], true, "{web:#}");
+    let detail = web["detail"].as_str().expect("detail");
+    assert!(
+        detail.contains("snapshot") && detail.contains("vol1") && detail.contains("/data"),
+        "{detail}"
+    );
+    // The later row counts all of it as pending.
+    let api = check(&answer["rows"][1], "size");
+    assert_eq!(
+        api["measure"]["pendingBytes"],
+        part("neededBytes"),
+        "{api:#}"
+    );
+    rig.assert_only_reads();
+    let _ = fs::remove_dir_all(&host_folder);
+}
+
+#[test]
+fn a_storage_folder_the_kernels_user_cannot_list_is_not_measured_with_the_reason() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = Rig::new(
+        Host::new(true, "203.0.113.10"),
+        Host::new(false, "203.0.113.20"),
+    );
+    rig.files("web", 1);
+    let folder = rig
+        .dir
+        .join("source/storage-pools/default/containers/shop_web");
+    fs::set_permissions(&folder, fs::Permissions::from_mode(0o711)).expect("chmod");
+    fs::set_permissions(folder.join("rootfs"), fs::Permissions::from_mode(0o000)).expect("chmod");
+    let listable = fs::read_dir(folder.join("rootfs")).is_ok();
+    let answer = rig.preflight(&["web"]);
+    fs::set_permissions(folder.join("rootfs"), fs::Permissions::from_mode(0o755))
+        .expect("chmod back");
+    if listable {
+        eprintln!(
+            "skipped: this user lists a mode 0000 folder (root), so the refusal cannot be seen here"
+        );
+        return;
+    }
+    let size = check(&answer["rows"][0], "size");
+    assert_eq!(size["ok"], false, "{size:#}");
+    let detail = size["detail"].as_str().expect("detail");
+    assert!(detail.contains("not measured"), "{detail}");
+    assert!(
+        detail.to_lowercase().contains("permission denied"),
+        "{detail}"
+    );
+    assert!(detail.contains("read access"), "{detail}");
+    assert!(
+        size["measure"]["notMeasured"].as_str().is_some(),
+        "{size:#}"
+    );
+    rig.assert_only_reads();
+}
+
+#[test]
+fn an_optional_usb_or_hotplug_device_the_target_lacks_is_a_risk_and_a_required_one_is_no_go() {
+    let mut source = Host::new(true, "203.0.113.10");
+    let devices = &mut source.instances[0]["devices"];
+    devices["stick"] = json!({ "type": "usb", "vendorid": "0403", "productid": "6001" });
+    devices["dongle"] = json!({ "type": "unix-hotplug", "vendorid": "0403", "productid": "6001" });
+    devices["key"] =
+        json!({ "type": "usb", "vendorid": "1050", "productid": "0407", "required": "true" });
+    let rig = Rig::new(source, Host::new(false, "203.0.113.20"));
+    rig.files("web", 1);
+    let answer = rig.preflight(&["web"]);
+    let devices = check(&answer["rows"][0], "devices");
+    assert_eq!(finding(devices, "stick")["ok"], true, "{devices:#}");
+    let dongle = finding(devices, "dongle");
+    assert_eq!(dongle["ok"], true, "{devices:#}");
+    assert!(
+        dongle["detail"].as_str().expect("detail").contains("0403"),
+        "{dongle:#}"
+    );
+    assert_eq!(finding(devices, "key")["ok"], false, "{devices:#}");
+    assert_eq!(devices["ok"], false);
+    let risks = devices["risks"].to_string();
+    assert!(
+        risks.contains("stick") && risks.contains("dongle"),
+        "{risks}"
+    );
+    rig.assert_only_reads();
+}
