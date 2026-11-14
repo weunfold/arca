@@ -2,7 +2,8 @@
 //! request it receives.
 //!
 //! GET routes: `/1.0`, `/1.0/projects?recursion=1`, `/1.0/instances?all-projects=true&recursion=1`,
-//! `/1.0/instances?all-projects=true&recursion=2`, `/1.0/storage-pools?recursion=1`, `/1.0/storage-pools/<pool>/resources`,
+//! `/1.0/instances?all-projects=true&recursion=2`, `/1.0/storage-pools?recursion=1`, `/1.0/storage-pools/<pool>` (its driver set by
+//! [`FakeIncus::set_pool_driver`]), `/1.0/storage-pools/<pool>/resources`,
 //! `/1.0/networks?recursion=1` and `/1.0/networks/<name>/state` (the host's interfaces, set by
 //! [`FakeIncus::set_host_interfaces`]), every object path, `/1.0/operations?all-projects=true&recursion=1`, and
 //! `/1.0/operations/<id>` with its `/wait`. Any other GET is 404.
@@ -234,6 +235,8 @@ struct Shared {
     counter: AtomicU64,
     /// The `/1.0/resources` document the fake serves, when a test sets one.
     resources: Mutex<Option<Value>>,
+    /// The driver each pool's own document names, by pool, set by [`FakeIncus::set_pool_driver`].
+    pool_drivers: Mutex<BTreeMap<String, String>>,
 }
 
 /// The served state: the server document, the pools, every object and every operation.
@@ -323,6 +326,7 @@ enum Route {
     HostInterfaces,
     HostInterfaceState(String),
     PoolResources(String),
+    PoolObject(String),
     NetworkLeases(String),
     InstanceState(Address),
     InstanceRebuild(Address),
@@ -433,6 +437,7 @@ impl Shared {
             restores: Mutex::new(BTreeMap::new()),
             counter: AtomicU64::new(1),
             resources: Mutex::new(None),
+            pool_drivers: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -538,6 +543,28 @@ impl FakeIncus {
     /// Serves `document` at `/1.0/resources`. Until a test sets one, the fake answers 404, as an Incus without the endpoint.
     pub fn set_resources(&self, document: Value) {
         *lock(&self.shared.resources) = Some(document);
+    }
+
+    /// Names the driver of the pool `pool` in the pool's own document, `GET /1.0/storage-pools/<pool>`. A pool the state
+    /// holds answers `dir` until a test names another; a pool it does not hold answers 404. It records no write.
+    pub fn set_pool_driver(&self, pool: &str, driver: &str) {
+        lock(&self.shared.pool_drivers).insert(pool.to_string(), driver.to_string());
+    }
+
+    /// Puts a network ACL in `project`, as a create by hand would. It records no write.
+    pub fn add_acl(&self, project: &str, body: Value) {
+        let mut store = lock(&self.shared.store);
+        let name = text_of(&body, "name");
+        store.objects.retain(|object| {
+            !(object.kind == "acl" && object.project == project && object.name == name)
+        });
+        store.objects.push(Stored {
+            kind: "acl".to_string(),
+            project: project.to_string(),
+            name,
+            parent: String::new(),
+            body,
+        });
     }
 
     /// Sets the host's own interfaces: each name with the addresses it holds. The fake answers the listing of
@@ -1356,6 +1383,7 @@ fn parse(target: &str) -> Option<Route> {
         }
         ["images", fingerprint] => Route::Object(address("image", "", fingerprint)),
         ["storage-pools"] if query == "recursion=1" => Route::ListPools,
+        ["storage-pools", pool] if query.is_empty() => Route::PoolObject((*pool).to_string()),
         ["storage-pools", pool, "resources"] if query.is_empty() => {
             Route::PoolResources((*pool).to_string())
         }
@@ -1502,6 +1530,17 @@ fn dispatch(shared: &Shared, request: &Request, route: Route) -> (u16, String, V
             match store.pools.iter().find(|(name, _)| *name == pool) {
                 Some((_, resources)) => sync(resources.clone()),
                 None => (404, String::new(), error_envelope(404, "not found")),
+            }
+        }
+        ("GET", Route::PoolObject(pool)) => {
+            if store.pools.iter().any(|(name, _)| *name == pool) {
+                let driver = lock(&shared.pool_drivers)
+                    .get(&pool)
+                    .cloned()
+                    .unwrap_or_else(|| "dir".to_string());
+                sync(json!({ "name": pool, "driver": driver, "status": "Created", "config": {} }))
+            } else {
+                (404, String::new(), error_envelope(404, "not found"))
             }
         }
         ("GET", Route::ListOperations) => {

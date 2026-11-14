@@ -83,7 +83,7 @@ impl Verb {
     }
 }
 
-static VERBS: [Verb; 68] = [
+static VERBS: [Verb; 69] = [
     Verb {
         name: "arca_status",
         summary: "Node status: the API version, the node id, the mode, the uptime, whether Incus answers and the last applied sequence number.",
@@ -1041,7 +1041,156 @@ static VERBS: [Verb; 68] = [
         params: host_network_restore_params,
         result: host_network_restore_result,
     },
+    Verb {
+        name: "instance_move_preflight",
+        summary: "Before any move: whether a linked host can take each instance, one go/no-go row per instance in input order. Each row checks the instance's measured size against the target pool's free space less the earlier instances of the call, the storage driver change, the CPU features (all of them for a live move), devices the target lacks, networks and fixed addresses, projects, profiles and ACLs, proxies listening on this host's own address, and macvlan parent names, each ok or the reason it is not with what to do. It only reads: nothing is stopped, copied, created or recorded.",
+        class: VerbClass::L,
+        min_scope: Scope::Viewer,
+        writes: false,
+        destructive: false,
+        untrusted: false,
+        output_key: None,
+        summary_text: summary_move_preflight,
+        cut: no_cut,
+        params: instance_move_preflight_params,
+        result: instance_move_preflight_result,
+    },
 ];
+
+/// The checks of every `instance_move_preflight` row, in the order each row lists them.
+pub const MOVE_PREFLIGHT_CHECKS: [&str; 8] = [
+    "size",
+    "storageDriver",
+    "cpu",
+    "devices",
+    "networks",
+    "projectsProfilesAcls",
+    "proxyListen",
+    "macvlanParents",
+];
+
+fn instance_move_preflight_params() -> Value {
+    let reference = params(vec![
+        (
+            "project",
+            true,
+            json!({
+                "description": "The Incus project the instance is in, on this node.",
+                "maxLength": 63,
+                "minLength": 1,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$",
+                "type": "string"
+            }),
+        ),
+        ("name", true, instance_name_schema()),
+    ]);
+    params(vec![
+        (
+            "instances",
+            true,
+            json!({
+                "description": "The instances to check, in the order the rows answer them: 1 to 50 references. One instance is a list of one. An earlier instance whose size fits counts as already destined for the target when a later one is sized.",
+                "items": reference,
+                "maxItems": 50,
+                "type": "array"
+            }),
+        ),
+        (
+            "target",
+            true,
+            json!({
+                "description": "The target node: the name of one of this kernel's linked hosts (approval.linkedHosts). Its facts are read through that host's incusSocket.",
+                "maxLength": 253,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$",
+                "type": "string"
+            }),
+        ),
+        (
+            "live",
+            false,
+            json!({
+                "description": "Check for a live (stateful) move: the target's CPU must then have every CPU feature of this host. Absent or false, a cold move, where a missing feature is a risk and not a blocker.",
+                "type": "boolean"
+            }),
+        ),
+    ])
+}
+
+fn instance_move_preflight_result() -> Value {
+    let finding = result(vec![
+        ("subject", true, string()),
+        ("ok", true, boolean()),
+        ("detail", true, string()),
+        ("proposal", true, nullable(string())),
+    ]);
+    let measure = result(vec![
+        ("method", true, nullable_enum(&["walked", "driver"])),
+        ("path", true, nullable(string())),
+        ("measuredBytes", true, nullable(int())),
+        ("headroomBytes", true, nullable(int())),
+        ("neededBytes", true, nullable(int())),
+        ("sourcePool", true, nullable(string())),
+        ("targetPool", true, nullable(string())),
+        ("targetFreeBytes", true, nullable(int())),
+        ("pendingBytes", true, int()),
+        ("pendingFor", true, array(string())),
+        ("availableBytes", true, nullable(int())),
+    ]);
+    let check = result(vec![
+        ("check", true, one_of(&MOVE_PREFLIGHT_CHECKS)),
+        ("ok", true, boolean()),
+        ("detail", true, string()),
+        ("findings", true, array(finding)),
+        ("risks", true, array(string())),
+        ("measure", false, measure),
+        ("sourceDriver", false, nullable(string())),
+        ("targetDriver", false, nullable(string())),
+        ("crossesDriver", false, nullable(boolean())),
+        ("live", false, boolean()),
+        ("missingFeatures", false, array(string())),
+        ("sourceBaseline", false, nullable(string())),
+        ("targetBaseline", false, nullable(string())),
+    ]);
+    let row = result(vec![
+        ("project", true, string()),
+        ("name", true, string()),
+        ("target", true, string()),
+        ("go", true, boolean()),
+        ("reason", true, nullable(string())),
+        ("checks", true, array(check)),
+    ]);
+    result(vec![
+        (
+            "target",
+            true,
+            result(vec![
+                ("name", true, string()),
+                ("reachable", true, boolean()),
+                ("reason", true, nullable(string())),
+            ]),
+        ),
+        ("live", true, boolean()),
+        ("rows", true, array(row)),
+    ])
+}
+
+/// A short line for a successful `instance_move_preflight`.
+pub fn summary_move_preflight(v: &Value) -> String {
+    let rows = v["rows"].as_array().map_or(&[][..], Vec::as_slice);
+    let go = rows.iter().filter(|row| row["go"] == true).count();
+    let target = v["target"]["name"].as_str().unwrap_or("?");
+    let unread = if v["target"]["reachable"] == false {
+        " (the target could not be read)"
+    } else {
+        ""
+    };
+    format!(
+        "{} instance(s) to {target}: {go} go, {} no-go{unread}",
+        rows.len(),
+        rows.len() - go
+    )
+}
 
 fn host_network_restore_params() -> Value {
     params(vec![("approval", true, approval_schema())])

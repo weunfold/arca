@@ -205,13 +205,17 @@ pub struct PeerKeysConfig {
 }
 
 /// One linked kernel: the name the canvas knows it by, its MCP unix socket, and the file holding the token the page relays
-/// with (scope `doctor`, and ideally limited to `plan_list`, `action_approve` and `plan_decline`).
+/// with (scope `doctor`, and ideally limited to `plan_list`, `action_approve` and `plan_decline`). `incusSocket`, when set,
+/// is that machine's Incus socket on this one (local, or forwarded to a path here): `instance_move_preflight` reads the
+/// linked host's facts through it, with GETs only.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LinkedHost {
     pub name: String,
     pub socket: PathBuf,
     pub token_file: PathBuf,
+    #[serde(default)]
+    pub incus_socket: Option<PathBuf>,
 }
 
 /// Where Incus listens, and which storage pools the sampler reports. The pools come from Incus's own pool list. `pools` is an

@@ -10834,6 +10834,338 @@
       "x-arca-read-only-hint": false,
       "x-arca-scope": "doctor",
       "x-arca-writes": true
+    },
+    {
+      "name": "instance_move_preflight",
+      "params": [
+        {
+          "name": "instances",
+          "required": true,
+          "schema": {
+            "description": "The instances to check, in the order the rows answer them: 1 to 50 references. One instance is a list of one. An earlier instance whose size fits counts as already destined for the target when a later one is sized.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "description": "The Incus instance name.",
+                  "maxLength": 63,
+                  "minLength": 1,
+                  "pattern": "^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$",
+                  "type": "string"
+                },
+                "project": {
+                  "description": "The Incus project the instance is in, on this node.",
+                  "maxLength": 63,
+                  "minLength": 1,
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "project",
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxItems": 50,
+            "type": "array"
+          }
+        },
+        {
+          "name": "target",
+          "required": true,
+          "schema": {
+            "description": "The target node: the name of one of this kernel's linked hosts (approval.linkedHosts). Its facts are read through that host's incusSocket.",
+            "maxLength": 253,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$",
+            "type": "string"
+          }
+        },
+        {
+          "name": "live",
+          "required": false,
+          "schema": {
+            "description": "Check for a live (stateful) move: the target's CPU must then have every CPU feature of this host. Absent or false, a cold move, where a missing feature is a risk and not a blocker.",
+            "type": "boolean"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "live": {
+              "type": "boolean"
+            },
+            "rows": {
+              "items": {
+                "properties": {
+                  "checks": {
+                    "items": {
+                      "properties": {
+                        "check": {
+                          "enum": [
+                            "size",
+                            "storageDriver",
+                            "cpu",
+                            "devices",
+                            "networks",
+                            "projectsProfilesAcls",
+                            "proxyListen",
+                            "macvlanParents"
+                          ],
+                          "type": "string"
+                        },
+                        "crossesDriver": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ]
+                        },
+                        "detail": {
+                          "type": "string"
+                        },
+                        "findings": {
+                          "items": {
+                            "properties": {
+                              "detail": {
+                                "type": "string"
+                              },
+                              "ok": {
+                                "type": "boolean"
+                              },
+                              "proposal": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "subject": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "subject",
+                              "ok",
+                              "detail",
+                              "proposal"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "live": {
+                          "type": "boolean"
+                        },
+                        "measure": {
+                          "properties": {
+                            "availableBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "headroomBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "measuredBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "method": {
+                              "anyOf": [
+                                {
+                                  "enum": [
+                                    "walked",
+                                    "driver"
+                                  ],
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "neededBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "path": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "pendingBytes": {
+                              "type": "integer"
+                            },
+                            "pendingFor": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            },
+                            "sourcePool": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "targetFreeBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "targetPool": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "method",
+                            "path",
+                            "measuredBytes",
+                            "headroomBytes",
+                            "neededBytes",
+                            "sourcePool",
+                            "targetPool",
+                            "targetFreeBytes",
+                            "pendingBytes",
+                            "pendingFor",
+                            "availableBytes"
+                          ],
+                          "type": "object"
+                        },
+                        "missingFeatures": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "ok": {
+                          "type": "boolean"
+                        },
+                        "risks": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "sourceBaseline": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "sourceDriver": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "targetBaseline": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "targetDriver": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "check",
+                        "ok",
+                        "detail",
+                        "findings",
+                        "risks"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "go": {
+                    "type": "boolean"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "target": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "project",
+                  "name",
+                  "target",
+                  "go",
+                  "reason",
+                  "checks"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "target": {
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "reachable": {
+                  "type": "boolean"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "reachable",
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "target",
+            "live",
+            "rows"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "Before any move: whether a linked host can take each instance, one go/no-go row per instance in input order. Each row checks the instance's measured size against the target pool's free space less the earlier instances of the call, the storage driver change, the CPU features (all of them for a live move), devices the target lacks, networks and fixed addresses, projects, profiles and ACLs, proxies listening on this host's own address, and macvlan parent names, each ok or the reason it is not with what to do. It only reads: nothing is stopped, copied, created or recorded.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": true,
+      "x-arca-scope": "viewer",
+      "x-arca-writes": false
     }
   ],
   "openrpc": "1.3.2",
