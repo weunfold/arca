@@ -2,7 +2,13 @@ use arca_link::{Config, Link, Network, PAIR_ALPN, PairLink, State};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use iroh::EndpointAddr;
 use iroh_tickets::endpoint::EndpointTicket;
-use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 use tokio::{net::UnixListener, time::timeout};
 
 const FORWARD: &[u8] = b"test/1";
@@ -375,10 +381,19 @@ async fn first_stream_and_first_pair_line_have_an_accept_deadline() {
             .unwrap();
         let (mut send, _recv) = partial_line.open_bi().await.unwrap();
         send.write_all(b"{").await.unwrap();
+        // The deadline is timed from here, after the node startups a loaded machine makes slow. Both connections were
+        // accepted before this, so the server's 10-second deadline has at most 10 seconds left; the margin is for the
+        // load, and a deadline made much longer is still caught.
+        let connected = Instant::now();
         // Each is closed by the server's accept deadline, and says so: a close for any other reason is not this one.
         let (first, second) = tokio::join!(no_stream.closed(), partial_line.closed());
+        let waited = connected.elapsed();
         assert!(first.to_string().contains("too slow"), "{first}");
         assert!(second.to_string().contains("too slow"), "{second}");
+        assert!(
+            waited < Duration::from_secs(30),
+            "the accept deadline closed the idle connections only {waited:?} after they were made"
+        );
         host.shutdown().await;
         guest.shutdown().await;
     })

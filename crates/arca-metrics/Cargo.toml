@@ -14,7 +14,7 @@ serde_json.workspace = true
 [dev-dependencies]
 arca-api.workspace = true
 # The probe tests hold a loopback port bound and never listening, so a connect to it is refused.
-rustix.workspace = true
+rustix = { workspace = true, features = ["net"] }
 
 [lints]
 workspace = true

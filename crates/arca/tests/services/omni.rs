@@ -261,10 +261,17 @@ struct OmniRig {
 
 /// A loopback port nothing listens on, for as long as the returned socket lives. The socket is bound and never listens,
 /// so a connect to it is refused, and no listener of another test run beside this one can take the port, as one did
-/// when the port was a listener's, closed a moment before.
+/// when the port was a listener's, closed a moment before. It is closed on exec, so no child a test starts keeps the
+/// port bound after the test.
 fn closed_port() -> (std::os::fd::OwnedFd, SocketAddr) {
-    use rustix::net::{AddressFamily, SocketType, bind, getsockname, socket};
-    let held = socket(AddressFamily::INET, SocketType::STREAM, None).expect("a TCP socket");
+    use rustix::net::{AddressFamily, SocketFlags, SocketType, bind, getsockname, socket_with};
+    let held = socket_with(
+        AddressFamily::INET,
+        SocketType::STREAM,
+        SocketFlags::CLOEXEC,
+        None,
+    )
+    .expect("a TCP socket");
     bind(
         &held,
         &std::net::SocketAddrV4::new(std::net::Ipv4Addr::LOCALHOST, 0),

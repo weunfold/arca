@@ -1395,10 +1395,17 @@ mod latency_probe {
 
     /// A loopback port with nothing listening on it, for as long as the returned socket lives. The socket is bound and
     /// never listens, so a connect to it is refused, and no listener of another test run beside this one can take the
-    /// port, as one did when this closed a listener and kept only its address.
+    /// port, as one did when this closed a listener and kept only its address. It is closed on exec, so no child a test
+    /// starts keeps the port bound after the test.
     fn closed_port() -> (OwnedFd, SocketAddr) {
-        use rustix::net::{AddressFamily, SocketType, bind, getsockname, socket};
-        let held = socket(AddressFamily::INET, SocketType::STREAM, None).expect("a TCP socket");
+        use rustix::net::{AddressFamily, SocketFlags, SocketType, bind, getsockname, socket_with};
+        let held = socket_with(
+            AddressFamily::INET,
+            SocketType::STREAM,
+            SocketFlags::CLOEXEC,
+            None,
+        )
+        .expect("a TCP socket");
         bind(&held, &SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0)).expect("bind a loopback port");
         let addr = getsockname(&held).expect("the socket has an address");
         (held, SocketAddr::try_from(addr).expect("an IP address"))
