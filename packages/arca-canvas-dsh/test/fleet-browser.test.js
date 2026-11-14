@@ -163,12 +163,38 @@ test('the Fleet view is one click from the top bar, round-trips #fleet, and stay
   await page.waitForFunction(() => location.hash === '#fleet');
   await page.locator('.arca-fleet-row').first().waitFor();
 
-  // Choosing a project in the picker leaves the Fleet view for that project.
-  const option = await page.locator('.arca-project-select option').first().getAttribute('value');
-  await page.locator('.arca-project-select').selectOption(option === null ? { index: 0 } : option);
-  await page.locator('.arca-project-select').dispatchEvent('change');
-  await page.waitForFunction(() => location.hash.startsWith('#project/'));
+  // In the Fleet view the picker shows "Fleet", so choosing the project shown before is a real change that leaves the view.
+  const picker = page.locator('.arca-project-select');
+  const shownBefore = decodeURIComponent(projectHash.slice('#project/'.length));
+  assert.equal(await picker.inputValue(), '');
+  assert.equal(await picker.evaluate((node) => node.selectedOptions[0]?.textContent), 'Fleet');
+  await picker.selectOption({ label: shownBefore });
+  await page.waitForFunction((hash) => location.hash === hash, projectHash);
   assert.equal(await page.locator('.arca-fleet').isVisible(), false);
+  assert.equal(await page.locator('.arca-scroller').isVisible(), true);
+  assert.equal(await picker.inputValue(), shownBefore);
+  assert.equal(await picker.locator('option', { hasText: 'Fleet' }).count(), 0, 'the placeholder leaves with the view');
+
+  // A fresh tab opened straight at #fleet on a one-project canvas has no history; the picker is the way to the project.
+  const fresh = await context.newPage();
+  fresh.on('pageerror', (error) => errors.push(error.message));
+  await fresh.goto(`${base}#fleet`);
+  await fresh.locator('.arca-fleet-row').first().waitFor();
+  assert.equal(await fresh.locator('.arca-project-select option:not([hidden])').count(), 1, 'one project');
+  await fresh.locator('.arca-project-select').selectOption({ label: shownBefore });
+  await fresh.waitForFunction((hash) => location.hash === hash, projectHash);
+  assert.equal(await fresh.locator('.arca-scroller').isVisible(), true);
+
+  // Dark mode renders the same table on the dark tokens.
+  await fresh.goto(`${base}#fleet`);
+  await fresh.locator('.arca-fleet-row').first().waitFor();
+  const background = () => fresh.locator('.arca-fleet-card').evaluate((node) => getComputedStyle(node).backgroundColor);
+  await fresh.emulateMedia({ colorScheme: 'light' });
+  const light = await background();
+  await fresh.emulateMedia({ colorScheme: 'dark' });
+  const dark = await background();
+  assert.notEqual(light, dark, 'the card follows the colour scheme');
+  assert.equal(await fresh.locator('.arca-fleet-row').count(), 4);
 
   assert.ok(methods.every((method) => method === 'GET'), 'the canvas sends only GET requests');
   assert.deepEqual(errors, []);

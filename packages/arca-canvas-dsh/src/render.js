@@ -1024,6 +1024,11 @@ export function createCanvas(root, { base = '/arca-canvas' } = {}) {
   chatTab.addEventListener('click', () => setTab('chat'));
   stepsTab.addEventListener('click', () => setTab('steps'));
 
+  const fleetOption = doc.createElement('option');
+  fleetOption.value = '';
+  fleetOption.textContent = 'Fleet';
+  fleetOption.disabled = true;
+  fleetOption.hidden = true;
   const updatePicker = () => {
     const projects = state.dashboard?.projects ?? [];
     const signature = projects.map((project) => `${project.name}\u0000${project.kind}`).join('\u0001');
@@ -1045,7 +1050,15 @@ export function createCanvas(root, { base = '/arca-canvas' } = {}) {
       }
       picker.replaceChildren(fragment);
     }
-    picker.value = state.project?.name ?? '';
+    // In the Fleet view the picker shows "Fleet", not a project, so choosing any project (the one shown before
+    // included) is a change that leaves the view. The placeholder is hidden from the list and cannot be chosen.
+    if (state.view === 'fleet') {
+      if (fleetOption.parentNode !== picker) picker.prepend(fleetOption);
+      picker.value = '';
+    } else {
+      fleetOption.remove();
+      picker.value = state.project?.name ?? '';
+    }
   };
 
   const updateSummary = () => {
@@ -2137,6 +2150,7 @@ export function createCanvas(root, { base = '/arca-canvas' } = {}) {
     if (!state.dashboard) return;
     if (location.hash === FLEET_HASH) {
       state.view = 'fleet';
+      updatePicker();
       updateCanvas();
       return;
     }

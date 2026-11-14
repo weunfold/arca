@@ -1807,6 +1807,11 @@
     };
     chatTab.addEventListener("click", () => setTab("chat"));
     stepsTab.addEventListener("click", () => setTab("steps"));
+    const fleetOption = doc.createElement("option");
+    fleetOption.value = "";
+    fleetOption.textContent = "Fleet";
+    fleetOption.disabled = true;
+    fleetOption.hidden = true;
     const updatePicker = () => {
       const projects = state.dashboard?.projects ?? [];
       const signature = projects.map((project) => `${project.name}\0${project.kind}`).join("");
@@ -1828,7 +1833,13 @@
         }
         picker.replaceChildren(fragment);
       }
-      picker.value = state.project?.name ?? "";
+      if (state.view === "fleet") {
+        if (fleetOption.parentNode !== picker) picker.prepend(fleetOption);
+        picker.value = "";
+      } else {
+        fleetOption.remove();
+        picker.value = state.project?.name ?? "";
+      }
     };
     const updateSummary = () => {
       summary.textContent = state.dashboard?.summary ?? "";
@@ -2866,6 +2877,7 @@ ${statement}`)
       if (!state.dashboard) return;
       if (location.hash === FLEET_HASH) {
         state.view = "fleet";
+        updatePicker();
         updateCanvas();
         return;
       }
