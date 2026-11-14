@@ -5,7 +5,10 @@
 # the fake GitHub for a job with it, runs the job once and exits. When GitHub tells it to update itself first it does
 # what a real runner does: it replaces its own files, which fails when its tools directory is a mount. `docker build`
 # records the Dockerfile it reads and makes a local image of it; a runner is played in a container started from the
-# runner image, or from a local image built FROM it. Nothing here is Docker.
+# runner image, or from a local image built FROM it. In registration-token mode a container named <pool>-s<slot>-reg
+# plays config.sh: it registers a persistent runner with the token mounted at /run/arca/token and writes the runner's
+# registration into the folder mounted at /run/arca/registration; a runner started with such a registration takes job
+# after job and does not exit. Nothing here is Docker.
 set -u
 # The controller runs with only the programs its script declares on its PATH. This stand-in is not the controller: it
 # takes the machine's whole PATH back, and does not report its own programs as the controller's.
@@ -27,7 +30,8 @@ command=${1-}
 
 # The name, the slice and the image of a `docker run` or `docker create`: the image is the first argument that is
 # neither an option nor an option's value.
-name='' cgroup_parent='' image='' jit_file='' tools_mounted='' home_mount='' command_line=''
+name='' cgroup_parent='' image='' jit_file='' tools_mounted='' home_mount='' command_line='' token_file='' reg_dir=''
+reg_dir_ro='' command_args=()
 parse_run() {
   while [ $# -gt 0 ]; do
     case $1 in
@@ -36,6 +40,9 @@ parse_run() {
       -v)
         case $2 in
           *:/run/arca/jitconfig:ro) jit_file=${2%:/run/arca/jitconfig:ro} ;;
+          *:/run/arca/token:ro) token_file=${2%:/run/arca/token:ro} ;;
+          *:/run/arca/registration) reg_dir=${2%:/run/arca/registration} ;;
+          *:/run/arca/registration:ro) reg_dir_ro=${2%:/run/arca/registration:ro} ;;
           *:/home/runner/externals | *:/home/runner/externals:*) tools_mounted=1 ;;
           *:/home/runner:ro) home_mount=${2%:/home/runner:ro} ;;
           *:/home/runner) home_mount=${2%:/home/runner} ;;
@@ -49,6 +56,7 @@ parse_run() {
         image=$1
         shift
         command_line=$*
+        command_args=("$@")
         return
         ;;
     esac
@@ -56,7 +64,7 @@ parse_run() {
 }
 
 play_runner() {
-  local dir=$1 jit=$2 tools_mounted=$3 answer job seconds result
+  local dir=$1 jit=$2 tools_mounted=$3 persistent=${4-} answer job seconds result
   echo "Connected to GitHub" >>"$dir/log"
   echo "Listening for Jobs" >>"$dir/log"
   while [ -d "$dir" ]; do
@@ -96,6 +104,11 @@ play_runner() {
       rm -f "$dir/worker"
       echo "$(date -u '+%Y-%m-%d %H:%M:%S')Z: Job $job completed with result: $result" >>"$dir/log"
       printf '%s' "$jit" | "$FAKE_REAL_CURL" -sS -m 5 -X POST --data-binary @- "$FAKE_GITHUB/_fake/done" >/dev/null 2>&1
+      # A persistent runner goes back to listening for its next job.
+      if [ -n "$persistent" ]; then
+        echo "Listening for Jobs" >>"$dir/log"
+        continue
+      fi
       end_play 0
       return
     fi
@@ -145,6 +158,64 @@ case $command in
       mkdir -p "$cgroup"
       echo "${FAKE_MEMORY_PEAK:-1610612736}" >"$cgroup/memory.peak"
       printf 'usage_usec %s\nuser_usec 1\nsystem_usec 1\n' "${FAKE_CPU_USEC:-73400000}" >"$cgroup/cpu.stat"
+    fi
+    if [ "$command" = run ] && runner_image "$image" && [ "$name" != "${name%-reg}" ]; then
+      # config.sh, in a container that ends when it is done (docker run --rm, not -d): its output is the command's.
+      rm -rf "$dir"
+      # shellcheck disable=SC2016
+      [ "${command_args[0]-}" = /bin/bash ] && [ "${command_args[1]-}" = -c ] &&
+        [ "${command_args[2]-}" = 'ACTIONS_RUNNER_INPUT_TOKEN=$(cat /run/arca/token) && export ACTIONS_RUNNER_INPUT_TOKEN && cd /home/runner && ./config.sh --unattended --replace "$@" && cp .runner .credentials .credentials_rsaparams /run/arca/registration/' ] ||
+        { echo "fake docker: the registration's command does not read its token" >&2; exit 125; }
+      [ -r "$token_file" ] && [ -d "$reg_dir" ] || { echo "fake docker: the registration was given no token or no folder" >&2; exit 125; }
+      set -- "${command_args[@]:4}"
+      url='' runner_name='' group='' labels='' ephemeral=false
+      while [ $# -gt 0 ]; do
+        case $1 in
+          --url) url=$2; shift 2 ;;
+          --name) runner_name=$2; shift 2 ;;
+          --runnergroup) group=$2; shift 2 ;;
+          --labels) labels=$2; shift 2 ;;
+          --ephemeral) ephemeral=true; shift ;;
+          --work) shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      echo "--------------------------------------------------------------------------------"
+      echo "|        ____ _ _   _   _       _          _        _   _                      |"
+      echo "# Authentication"
+      body=$(jq -nc --rawfile token "$token_file" --arg url "$url" --arg name "$runner_name" --arg group "$group" \
+        --arg labels "$labels" --argjson ephemeral "$ephemeral" \
+        '{token: $token, url: $url, name: $name, group: $group, labels: $labels, ephemeral: $ephemeral}')
+      answer=$(printf '%s' "$body" | "$FAKE_REAL_CURL" -sS -m 5 -X POST --data-binary @- "$FAKE_GITHUB/_fake/register" 2>/dev/null)
+      credential=$(printf '%s' "$answer" | jq -r '.credential // empty' 2>/dev/null)
+      if [ -z "$credential" ]; then
+        echo "Http response code: NotFound from 'POST https://api.github.com/actions/runner-registration'"
+        echo "Response status code does not indicate success: 404 (Not Found)."
+        exit 1
+      fi
+      echo "√ Connected to GitHub"
+      echo "√ Runner successfully added"
+      printf '{"agentName":"%s"}\n' "$runner_name" >"$reg_dir/.runner"
+      printf '%s' "$credential" >"$reg_dir/.credentials"
+      echo rsa >"$reg_dir/.credentials_rsaparams"
+      echo "√ Settings Saved."
+      exit 0
+    fi
+    if [ "$command" = run ] && runner_image "$image" && [ "$name" != "${name%-run}" ] && [ -n "$reg_dir_ro" ]; then
+      # A persistent runner reads the registration a registration container wrote.
+      case $command_line in
+        '/bin/bash -c cp /run/arca/registration/.runner /run/arca/registration/.credentials /run/arca/registration/.credentials_rsaparams /home/runner/ && exec /home/runner/run.sh') ;;
+        *) echo "fake docker: the persistent runner's command does not read its registration" >&2; exit 125 ;;
+      esac
+      [ -s "$reg_dir_ro/.runner" ] && [ -s "$reg_dir_ro/.credentials_rsaparams" ] && [ -r "$reg_dir_ro/.credentials" ] ||
+        { echo "fake docker: the runner was given no registration" >&2; exit 125; }
+      if [ -n "${FAKE_DETACH:-}" ]; then
+        setsid "$0" __play "$dir" "$(cat "$reg_dir_ro/.credentials")" "$tools_mounted" persistent </dev/null >/dev/null 2>&1 &
+      else
+        play_runner "$dir" "$(cat "$reg_dir_ro/.credentials")" "$tools_mounted" persistent </dev/null >/dev/null 2>&1 &
+      fi
+      echo "id-$name"
+      exit 0
     fi
     if [ "$command" = run ] && runner_image "$image" && [ "$name" != "${name%-run}" ]; then
       # The container's command reads the configuration from the mounted file, as the real one does.

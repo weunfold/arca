@@ -64,6 +64,8 @@ struct Runner {
     connected: bool,
     /// Whether this runner has updated itself, when GitHub asks runners to.
     updated: bool,
+    /// Whether it was registered with a registration token by config.sh, not --ephemeral: it takes job after job.
+    persistent: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -138,6 +140,10 @@ struct State {
     cut_delete_answers: bool,
     /// Whether a runner is registered without its id in the answer, as no real GitHub does.
     register_without_id: bool,
+    /// The registration token an organisation owner made, which config.sh registers persistent runners with.
+    registration_token: Option<String>,
+    /// What every config.sh sent when it registered a runner, whether GitHub took it or not.
+    registered: Vec<Value>,
     held: usize,
     passed: usize,
     /// A request was kept so long that it was answered without the test's word: the test was too slow, not the pool.
@@ -599,6 +605,51 @@ fn answer(
     body: &str,
 ) -> (u16, Option<Value>) {
     let bearer = authorization.strip_prefix("Bearer ").unwrap_or("");
+    // config.sh, which registers a runner with a registration token: GitHub's own registration service, not its API.
+    // A runner of the same name is replaced (--replace).
+    if path == "/_fake/register" {
+        let mut state = state.lock().expect("state");
+        let request: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+        state.registered.push(request.clone());
+        if state.registration_token.is_none()
+            || request["token"].as_str() != state.registration_token.as_deref()
+        {
+            return message(404, "Not Found");
+        }
+        let name = request["name"].as_str().unwrap_or("").to_string();
+        for runner in state.runners.iter_mut().filter(|runner| runner.name == name) {
+            runner.deleted = true;
+        }
+        state.next_id += 1;
+        let id = state.next_id;
+        let credential = format!("credential-synthetic-{id}-{}", "r".repeat(40));
+        let labels = ["self-hosted", "linux", "x64"]
+            .into_iter()
+            .map(str::to_string)
+            .chain(
+                request["labels"]
+                    .as_str()
+                    .unwrap_or("")
+                    .split(',')
+                    .filter(|label| !label.is_empty())
+                    .map(str::to_string),
+            )
+            .collect();
+        state.runners.push(Runner {
+            id,
+            name,
+            labels,
+            jit: credential.clone(),
+            status: "offline",
+            jobs: 0,
+            done: false,
+            deleted: false,
+            connected: false,
+            updated: false,
+            persistent: true,
+        });
+        return (200, Some(json!({ "credential": credential })));
+    }
     // The runner's own side, which is not GitHub's API: a runner asks for its job with its configuration.
     if path == "/_fake/poll" || path == "/_fake/done" || path == "/_fake/updated" {
         let mut state = state.lock().expect("state");
@@ -606,12 +657,15 @@ fn answer(
             return (200, Some(json!({ "gone": true })));
         };
         if path == "/_fake/done" {
-            state.runners[index].done = true;
+            // A persistent runner goes on to its next job.
+            state.runners[index].done = !state.runners[index].persistent;
             let name = state.runners[index].name.clone();
             state.finished.push(name);
             return (200, Some(json!({})));
         }
-        if state.runners[index].deleted || state.runners[index].jobs > 0 {
+        if state.runners[index].deleted
+            || (state.runners[index].jobs > 0 && !state.runners[index].persistent)
+        {
             return (200, Some(json!({ "gone": true })));
         }
         state.runners[index].connected = true;
@@ -760,6 +814,7 @@ fn answer(
             deleted: false,
             connected: false,
             updated: false,
+            persistent: false,
         });
         if state.register_without_id {
             return (
@@ -1814,6 +1869,7 @@ fn failures_are_counted_said_without_the_credential_and_paused_and_leftovers_are
             deleted: false,
             connected: false,
             updated: false,
+            persistent: false,
         });
     }
     let mut pool = Pool::new(
@@ -2188,7 +2244,8 @@ fn the_shipped_template_is_a_virtual_machine_with_its_script_its_secrets_and_pin
         [
             "GITHUB_APP_CLIENT_ID",
             "GITHUB_APP_PRIVATE_KEY",
-            "GITHUB_TOKEN"
+            "GITHUB_TOKEN",
+            "GITHUB_REGISTRATION_TOKEN"
         ]
     );
     assert!(template.ports.is_empty() && template.provides.is_none());
@@ -4192,9 +4249,9 @@ fn a_runner_that_updated_before_it_was_asked_and_stops_after_an_unclear_answer_i
 /// The packages a pool adds to the runner image when its settings name none, in the template and in the script alike:
 /// what GitHub's ubuntu-latest has and the pinned runner image (Ubuntu 24.04) lacks. libatomic1 is what pnpm loads;
 /// build-essential is make, gcc and g++; zstd is what actions/cache compresses with (without it the cache falls back
-/// to gzip, another cache version, and no cache saved with zstd restores); wget and skopeo are plain Ubuntu packages
-/// that jobs expect.
-const DEFAULT_PACKAGES: &str = "libatomic1 build-essential zstd wget skopeo";
+/// to gzip, another cache version, and no cache saved with zstd restores); wget, skopeo, xz-utils, zip, rsync and gh
+/// are plain Ubuntu packages that jobs expect.
+const DEFAULT_PACKAGES: &str = "libatomic1 build-essential zstd wget skopeo xz-utils zip rsync gh";
 
 /// A person using the pool found that no actions/cache restored (zstd missing) and that pnpm could not start
 /// (libatomic1 missing): both are in the template's default list, which a create without aptPackages keeps.
@@ -4210,7 +4267,17 @@ fn the_default_packages_carry_zstd_for_the_actions_cache_and_libatomic1_for_pnpm
         .iter()
         .map(|package| package.as_str().expect("a name"))
         .collect();
-    for needed in ["zstd", "libatomic1", "build-essential", "wget", "skopeo"] {
+    for needed in [
+        "zstd",
+        "libatomic1",
+        "build-essential",
+        "wget",
+        "skopeo",
+        "xz-utils",
+        "zip",
+        "rsync",
+        "gh",
+    ] {
         assert!(packages.contains(&needed), "{needed} not in {packages:?}");
     }
 }
@@ -4600,5 +4667,223 @@ fn an_adopted_job_is_timed_to_its_runners_end_and_not_the_unwatched_gap() {
     });
     assert_eq!(pool.stop(), Some(0));
     assert_eq!(pool.containers(), Vec::<String>::new());
+    let _ = fs::remove_dir_all(scratch);
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Registration-token mode
+// ---------------------------------------------------------------------------------------------------------------------
+
+/// A registration token as an organisation owner gets one from GitHub, made for these tests.
+const REGISTRATION_TOKEN: &str = "AABBREGISTRATIONSYNTHETIC0123456789XYZ";
+
+/// A pool of `slots` small slots for the organisation in registration-token mode, with no credential.
+fn registration_pool(slots: u64, change: impl FnOnce(&mut Value)) -> Pool {
+    let mut settings = settings(
+        json!([small(slots)]),
+        slots,
+        &format!("https://github.com/{ORG}"),
+    );
+    settings["registration"] = json!("registration-token");
+    settings["runnerGroup"] = json!("arca-pool");
+    change(&mut settings);
+    Pool::new(&settings, 64 * GIB, 60 * GIB)
+}
+
+fn mode(pool: &Pool, path: &str) -> u32 {
+    fs::metadata(pool.dir.join(path))
+        .expect(path)
+        .permissions()
+        .mode()
+        & 0o777
+}
+
+/// The person's policy forbids a key that can register runners anywhere in the organisation. An owner makes one
+/// registration token instead; the pool registers each slot once with it, as a persistent runner in the named group
+/// with the class's labels, keeps each runner's registration where only root reads it, deletes the token, and asks
+/// GitHub's API nothing. The runners take job after job without being registered again, and come back from their
+/// registration when the controller starts again.
+#[test]
+fn a_registration_token_registers_each_slot_once_as_a_persistent_runner_that_takes_job_after_job() {
+    let scratch = scratch_dir();
+    let github = Github::start(&scratch, &format!("/orgs/{ORG}"));
+    github.state().registration_token = Some(REGISTRATION_TOKEN.to_string());
+    let mut pool = registration_pool(2, |_| {});
+    pool.start(&github);
+    // Without a token nothing is registered, and the slots say what they wait for.
+    wait_for(&pool, "the slots waiting for a token", || {
+        pool.read("logs/status.txt")
+            .contains("queued (waiting for a registration token (GITHUB_REGISTRATION_TOKEN))")
+    });
+    assert!(github.state().registered.is_empty());
+    assert!(
+        pool.output()
+            .contains("slots 0, 1 have no registration yet: they wait for a registration token")
+    );
+    pool.secret("GITHUB_REGISTRATION_TOKEN", &format!("{REGISTRATION_TOKEN}\n"));
+    wait_for(&pool, "two persistent runners online", || {
+        github
+            .live()
+            .iter()
+            .filter(|runner| runner.status == "online")
+            .count()
+            == 2
+    });
+    let registered = github.state().registered.clone();
+    let mut names: Vec<&str> = registered
+        .iter()
+        .map(|request| request["name"].as_str().expect("a name"))
+        .collect();
+    names.sort_unstable();
+    assert_eq!(names, ["pool1-0", "pool1-1"]);
+    for request in &registered {
+        assert_eq!(request["url"], format!("https://github.com/{ORG}"));
+        assert_eq!(request["group"], "arca-pool");
+        // GitHub adds self-hosted, linux and x64 itself.
+        assert_eq!(request["labels"], "arca");
+        assert_eq!(request["ephemeral"], false);
+    }
+    for runner in github.live() {
+        assert_eq!(runner.labels, ["self-hosted", "linux", "x64", "arca"]);
+    }
+    // Used, and deleted.
+    wait_for(&pool, "the token deleted", || {
+        !pool.dir.join("secrets/GITHUB_REGISTRATION_TOKEN").exists()
+    });
+    wait_for(&pool, "the deletion said", || {
+        pool.output()
+            .contains("the registration token is deleted: every slot has its registration")
+    });
+    // Each runner's registration, where only root enters.
+    assert_eq!(mode(&pool, "state/registered"), 0o700);
+    for slot in 0..2 {
+        assert_eq!(mode(&pool, &format!("state/registered/{slot}")), 0o700);
+        for file in [".runner", ".credentials", ".credentials_rsaparams"] {
+            assert_eq!(
+                mode(&pool, &format!("state/registered/{slot}/{file}")),
+                0o600
+            );
+        }
+    }
+    for n in 1..=4 {
+        github.queue(
+            &["self-hosted", "linux", "x64", "arca"],
+            &format!("build #{n}"),
+            0.2,
+        );
+    }
+    wait_for(&pool, "four jobs recorded", || pool.jobs().len() == 4);
+    for job in pool.jobs() {
+        assert_eq!(job[5], "Succeeded", "{job:?}");
+        assert!(job[4].starts_with("build #"), "{job:?}");
+        assert!(job[9] == "pool1-0" || job[9] == "pool1-1", "{job:?}");
+    }
+    // The same two runners did all four: no registration more, and each slot's container started once.
+    assert_eq!(github.state().registered.len(), 2);
+    assert_eq!(github.live().len(), 2);
+    let calls = pool.read("docker/calls.log");
+    for slot in 0..2 {
+        assert_eq!(
+            calls
+                .lines()
+                .filter(|line| line.starts_with(&format!("run -d --name pool1-s{slot}-run ")))
+                .count(),
+            1,
+            "{calls}"
+        );
+    }
+    // GitHub's API was never asked anything: the pool holds no credential for it.
+    assert!(github.state().seen.is_empty());
+    let written = pool.everything_written();
+    assert!(
+        written.contains("config.sh --url https://github.com/example-org --name pool1-0"),
+        "the record of docker's arguments is read"
+    );
+    assert!(
+        !written.contains(REGISTRATION_TOKEN),
+        "the registration token was written or put on a command line"
+    );
+    assert_eq!(pool.stop(), Some(0));
+    assert!(pool.output().contains(
+        "stopping: runners without a job are stopped and keep their registration for the next start"
+    ));
+    assert_eq!(pool.containers(), Vec::<String>::new());
+
+    // The next controller starts both runners from their registration, with no token.
+    pool.start(&github);
+    github.queue(
+        &["self-hosted", "linux", "x64", "arca"],
+        "after the restart",
+        0.2,
+    );
+    wait_for(&pool, "the job after the restart", || pool.jobs().len() == 5);
+    assert_eq!(github.state().registered.len(), 2);
+    assert!(github.state().seen.is_empty());
+    assert_eq!(pool.stop(), Some(0));
+    let _ = fs::remove_dir_all(scratch);
+}
+
+/// Registration-token mode names its runner group, or its runners would land in the default one. A token GitHub does
+/// not take is said with config.sh's own words, registers nothing, never reaches a record, and is deleted once its
+/// hour is over.
+#[test]
+fn a_registration_token_github_refuses_is_said_and_deleted_after_its_hour_and_the_mode_needs_a_group() {
+    let scratch = scratch_dir();
+    let github = Github::start(&scratch, &format!("/orgs/{ORG}"));
+    github.state().registration_token = Some(REGISTRATION_TOKEN.to_string());
+    let mut pool = registration_pool(1, |settings| {
+        settings.as_object_mut().expect("settings").remove("runnerGroup");
+    });
+    pool.start(&github);
+    wait_for(&pool, "the missing group said", || {
+        pool.output()
+            .contains("settings: registration-token needs runnerGroup, the name of the organisation's runner group for this pool")
+    });
+    pool.stop();
+    drop(pool);
+
+    let mut pool = registration_pool(1, |settings| settings["registration"] = json!("ephemeral"));
+    pool.start(&github);
+    wait_for(&pool, "an unknown mode said", || {
+        pool.output()
+            .contains("settings: registration is jit (a just-in-time runner per job")
+    });
+    pool.stop();
+    drop(pool);
+
+    let wrong = "AAWRONGREGISTRATIONSYNTHETIC0123456789";
+    let mut pool = registration_pool(1, |_| {});
+    pool.env.push(("POOL_TOKEN_LIFE", "10".to_string()));
+    pool.start(&github);
+    // The token's hour runs from when it is put in, so it is put in once the pool waits for one.
+    wait_for(&pool, "the slot waiting for a token", || {
+        pool.read("logs/status.txt")
+            .contains("queued (waiting for a registration token (GITHUB_REGISTRATION_TOKEN))")
+    });
+    pool.secret("GITHUB_REGISTRATION_TOKEN", wrong);
+    wait_for(&pool, "the refusal in config.sh's words", || {
+        pool.output().contains("config.sh did not register the runner pool1-0 (exit 1): ")
+            && pool
+                .output()
+                .contains("Http response code: NotFound from ?POST https://api.github.com/actions/runner-registration?")
+    });
+    // config.sh's whole output is kept as it said it.
+    assert!(
+        pool.read("logs/register-0.log")
+            .contains("Http response code: NotFound from 'POST https://api.github.com/actions/runner-registration'")
+    );
+    wait_for(&pool, "the old token deleted", || {
+        !pool.dir.join("secrets/GITHUB_REGISTRATION_TOKEN").exists()
+            && pool.output().contains("the registration token is deleted: it is ")
+    });
+    wait_for(&pool, "the slot waiting for a new one", || {
+        pool.read("logs/status.txt")
+            .contains("queued (waiting for a registration token (GITHUB_REGISTRATION_TOKEN))")
+    });
+    assert!(github.live().is_empty());
+    assert!(!pool.dir.join("state/registered/0").exists());
+    assert!(!pool.everything_written().contains(wrong));
+    assert!(github.state().seen.is_empty());
+    assert_eq!(pool.stop(), Some(0));
     let _ = fs::remove_dir_all(scratch);
 }

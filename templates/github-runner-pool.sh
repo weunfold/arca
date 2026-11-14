@@ -9,6 +9,14 @@
 # - `arca-runner-pool run` is the controller. It keeps a set of slots. Each slot registers one just-in-time runner with
 #   GitHub (ephemeral: it takes one job and is then removed), runs it in a fresh container beside a Docker daemon of its
 #   own, records what the job used, removes both and starts over with a new registration.
+# - With the setting `registration` at `registration-token` the pool holds no GitHub credential at all. Each slot is
+#   registered once, with a registration token an organisation owner made (Settings > Actions > Runners > New
+#   self-hosted runner) and put in the secret GITHUB_REGISTRATION_TOKEN, as a persistent runner: config.sh, not
+#   --ephemeral. The runner's own registration (.runner, .credentials, .credentials_rsaparams) is kept per slot in
+#   /var/lib/arca-runner-pool/registered, which only root enters, and the slot's runner takes job after job: its
+#   container, its Docker daemon, its work directory and its caches stay between jobs. The token is deleted once every
+#   slot is registered, or after an hour, when GitHub's own has ended. A slot that has its registration starts without
+#   one. This mode keeps per-slot state between jobs: it is a bridge until each job runs in a machine of its own.
 #
 # What it reads:
 # - /etc/arca/settings.json: the service's settings (the template's, with what its service_create replaced), written
@@ -16,7 +24,8 @@
 # - /etc/arca-secrets/<NAME>: the template's secrets, written by Arca at each start (service_secret_set, then
 #   instance_start). Either GITHUB_APP_CLIENT_ID and GITHUB_APP_PRIVATE_KEY (a GitHub App installed on the organisation
 #   or repository), or GITHUB_TOKEN (a fine-grained token). When both are there the App is used. The controller mints
-#   every short-lived token itself.
+#   every short-lived token itself. In registration-token mode only GITHUB_REGISTRATION_TOKEN is read, and only by a
+#   slot that has no registration yet.
 #
 # What it writes: a status block and one line per finished job on the machine's console (service_logs), the same job
 # lines in /var/log/arca-runner-pool/jobs.tsv (bounded: one older file is kept), and the last status block in
@@ -52,6 +61,7 @@ set -u
 : "${POOL_STATUS_JOBS:=10}"    # finished jobs repeated in each status block
 : "${POOL_GROUP_EVERY:=600}"   # seconds between two reads of the runner group (or the repository) on GitHub
 : "${POOL_BUILD_RETRY:=60}"    # seconds before the first retry at building the runner image with its packages
+: "${POOL_TOKEN_LIFE:=3600}"   # seconds a registration token is kept; GitHub's lasts one hour
 
 INSTALLED=/usr/local/sbin/arca-runner-pool
 
@@ -71,9 +81,11 @@ POOL_PACKAGES='docker.io docker-cli curl jq openssl ca-certificates util-linux m
 # ubuntu-latest has and the pinned runner image lacks. libatomic1 is what Node.js-based tools such as pnpm load;
 # build-essential is make, gcc and g++; zstd is what actions/cache compresses with when it is there (without it the
 # cache falls back to gzip, a different cache version, so no cache saved with zstd restores); wget fetches files and
-# skopeo copies container images. Node.js is not one: a job sets up its own (actions/setup-node), and the runner
-# carries its own for JavaScript actions.
-POOL_RUNNER_PACKAGES='libatomic1 build-essential zstd wget skopeo'
+# skopeo copies container images; xz-utils is what tar unpacks .tar.xz with; zip and rsync are what their names say;
+# gh is GitHub's command line, from Ubuntu's universe component (older than GitHub's own apt repository, which a list
+# of names cannot add). Node.js is not one: a job sets up its own (actions/setup-node), and the runner carries its own
+# for JavaScript actions only, off the PATH.
+POOL_RUNNER_PACKAGES='libatomic1 build-essential zstd wget skopeo xz-utils zip rsync gh'
 # The runner image's own user and docker group (the image fixes both).
 RUNNER_UID=1001
 DOCKER_GID=123
@@ -204,6 +216,7 @@ SLOT_CLASS=()
 SLOT_CLASS_N=()
 SLOT_LABELS=()
 SLOT_LABELS_JSON=()
+SLOT_REG_LABELS=()
 SLOT_CPU=()
 SLOT_MEM=()
 CLASS_NAMES=()
@@ -290,6 +303,33 @@ load_settings() {
   ALLOW_DEFAULT_GROUP=$(jq -r '.allowDefaultRunnerGroup == true' "$POOL_SETTINGS")
   # A repository has no runner groups: its runners are registered with GitHub's fixed group number.
   [ -z "$repo" ] || GROUP=1
+  # How runners are registered: `jit`, a just-in-time runner per job registered with the pool's credential, or
+  # `registration-token`, one persistent runner per slot registered once with a token an owner made (see the top).
+  # config.sh names a runner group by its name, so that mode takes runnerGroup, the group's name: for an
+  # organisation it is required, since without it a runner lands in the default group, which every repository may
+  # be admitted to. A repository has no groups and needs none.
+  REG=''
+  GROUP_NAME=$(setting .runnerGroup)
+  case $(setting .registration) in
+    '' | jit) ;;
+    registration-token) REG=1 ;;
+    *)
+      say "settings: registration is jit (a just-in-time runner per job, registered with the pool's GitHub App or token) or registration-token (one persistent runner per slot, registered once with a registration token)"
+      return 1
+      ;;
+  esac
+  if [ -n "$REG" ] && [ -z "$repo" ]; then
+    case $GROUP_NAME in '' | *[!A-Za-z0-9\ ._-]* | ' '* | *' ')
+      say "settings: registration-token needs runnerGroup, the name of the organisation's runner group for this pool (letters, digits, spaces, dots, dashes and underscores), as GitHub shows it under Settings > Actions > Runner groups: without it the runners would be registered in the default group"
+      return 1
+      ;;
+    esac
+    [ ${#GROUP_NAME} -le 100 ] || {
+      say "settings: runnerGroup is at most 100 characters"
+      return 1
+    }
+  fi
+  [ -z "$repo" ] || GROUP_NAME=''
   MAX_SLOTS=$(setting .maxSlots)
   RUNNER_IMAGE=$(setting .runnerImage)
   DOCKER_IMAGE=$(setting .dockerImage)
@@ -331,7 +371,7 @@ load_settings() {
     return 1
   done
   RESERVE=$reserve
-  local name labels labels_json cpu memory slots bytes n
+  local name labels labels_json cpu memory slots bytes n custom part parts=()
   while IFS=$'\t' read -r name labels labels_json cpu memory slots; do
     bytes=$(size_bytes "$memory") || bytes=''
     # Each number is checked for its length before it is compared: a number too long for the shell's arithmetic is
@@ -346,6 +386,12 @@ load_settings() {
     fi
     cpu=$((10#$cpu))
     slots=$((10#$slots))
+    # The labels config.sh is given: GitHub adds self-hosted, linux and x64 to a runner it registers by itself.
+    custom=''
+    IFS=, read -r -a parts <<<"$labels"
+    for part in "${parts[@]}"; do
+      case ${part,,} in self-hosted | linux | x64) ;; *) custom="${custom:+$custom,}$part" ;; esac
+    done
     CLASS_FIRST+=("${#SLOT_CLASS[@]}")
     CLASS_NAMES+=("$name")
     for ((n = 0; n < slots; n++)); do
@@ -353,6 +399,7 @@ load_settings() {
       SLOT_CLASS_N+=($((${#CLASS_NAMES[@]} - 1)))
       SLOT_LABELS+=("$labels")
       SLOT_LABELS_JSON+=("$labels_json")
+      SLOT_REG_LABELS+=("$custom")
       SLOT_CPU+=("$cpu")
       SLOT_MEM+=("$bytes")
     done
@@ -396,6 +443,21 @@ load_pool_id() {
 # ---------------------------------------------------------------------------------------------------------------------
 
 secret_file() { printf '%s/%s' "$POOL_SECRETS" "$1"; }
+
+# Registration-token mode: the token an owner made, and where a slot keeps its runner's registration. A slot is
+# registered when the three files its runner needs to connect are there; they are moved in whole (slot_register).
+reg_token() { secret_file GITHUB_REGISTRATION_TOKEN; }
+slot_registration() { printf '%s/registered/%s' "$POOL_STATE" "$1"; }
+registered() {
+  local reg
+  reg=$(slot_registration "$1")
+  [ -s "$reg/.runner" ] && [ -s "$reg/.credentials" ] && [ -s "$reg/.credentials_rsaparams" ]
+}
+# Whether every slot has its registration.
+all_registered() {
+  local slot
+  for ((slot = 0; slot < SLOTS; slot++)); do registered "$slot" || return 1; done
+}
 
 # Which credential is set: `app`, `token`, or nothing.
 credential_kind() {
@@ -631,21 +693,177 @@ slot_reap() {
   set_state "$slot" cleaning
   # Inside the slot's own Docker daemon: the job's containers, volumes and networks go; images and build cache stay.
   docker exec "$daemon" sh -c 'c=$(docker ps -aq); [ -z "$c" ] || docker rm -fv $c; docker volume prune -af; docker network prune -f' >/dev/null 2>&1
-  used=$(du -sb "$dir/docker" 2>/dev/null | cut -f1)
-  if [ "${used:-0}" -gt "$DOCKER_BUDGET" ]; then
-    docker exec "$daemon" sh -c 'docker system prune -af --volumes; docker builder prune -af' >/dev/null 2>&1
-    say "slot $slot: its Docker cache passed $(mib "$DOCKER_BUDGET") MiB and was emptied"
-  fi
+  slot_trim_docker "$slot" "$daemon"
   docker rm -fv "$runner" "$daemon" >/dev/null 2>&1
   # Whatever is left in the slot's slice ends with it, and its memory peak starts from nothing for the next job.
   systemctl stop "$(slot_slice "$slot")" >/dev/null 2>&1
   rm -rf "${dir:?}/work" "${dir:?}/sock" "${POOL_RUN:?}/jit/$slot" "${dir:?}/kept"
   unlayer_home "$slot"
+  slot_trim_dependencies "$slot"
+}
+
+# The slot's Docker layer cache, emptied once it passes the slot's share of dockerCache.
+slot_trim_docker() {
+  local slot=$1 daemon=$2 used
+  used=$(du -sb "$(slot_dir "$slot")/docker" 2>/dev/null | cut -f1)
+  if [ "${used:-0}" -gt "$DOCKER_BUDGET" ]; then
+    docker exec "$daemon" sh -c 'docker system prune -af --volumes; docker builder prune -af' >/dev/null 2>&1
+    say "slot $slot: its Docker cache passed $(mib "$DOCKER_BUDGET") MiB and was emptied"
+  fi
+}
+
+# The slot's dependency caches, emptied once they pass the slot's share of dependencyCache.
+slot_trim_dependencies() {
+  local slot=$1 dir used
+  dir=$(slot_dir "$slot")
   used=$(du -sb "$dir/toolcache" "$dir/cache" 2>/dev/null | awk '{ total += $1 } END { print total + 0 }')
   if [ "${used:-0}" -gt "$DEPENDENCY_BUDGET" ]; then
     find "${dir:?}/toolcache" "${dir:?}/cache" -mindepth 1 -delete 2>/dev/null
     say "slot $slot: its dependency cache passed $(mib "$DEPENDENCY_BUDGET") MiB and was emptied"
   fi
+}
+
+# One finished job, in jobs.tsv and on the console: slot, when it finished (seconds), its name, its result, how long
+# it ran, the slot's memory peak, the CPU time in microseconds, and the runner.
+record_job() {
+  local slot=$1 finished=$2 job=$3 result=$4 seconds=$5 peak=$6 cpu=$7 name=$8 class=${SLOT_CLASS[$1]}
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s.%s\t%s\n' \
+    "$(date -u -d "@$finished" +%Y-%m-%dT%H:%M:%SZ)" "$slot" "$class" "${SLOT_LABELS[$slot]}" "$job" "$result" \
+    "$seconds" "$peak" $((cpu / 1000000)) $(((cpu % 1000000) / 100000)) "$name" >>"$POOL_LOGS/jobs.tsv"
+  printf x >>"$POOL_RUN/jobs"
+  say "job slot=$slot class=$class labels=${SLOT_LABELS[$slot]} name=\"$job\" result=$result seconds=$seconds peak_memory_mib=$(mib "$peak") cpu_seconds=$((cpu / 1000000)).$(((cpu % 1000000) / 100000)) runner=$name"
+}
+
+# The slot's memory peak and CPU time so far, from its slice, as "<peak bytes> <cpu microseconds>".
+slot_usage() {
+  local cgroup peak cpu
+  cgroup=$(slot_cgroup "$1")
+  peak=$(cat "$cgroup/memory.peak" 2>/dev/null)
+  cpu=$(awk '$1 == "usage_usec" { print $2 }' "$cgroup/cpu.stat" 2>/dev/null)
+  case $peak in '' | *[!0-9]*) peak=0 ;; esac
+  case $cpu in '' | *[!0-9]*) cpu=0 ;; esac
+  printf '%s %s' "$peak" "$cpu"
+}
+
+# The $2-th line of a persistent runner's output $1 that begins with the time and then $3 (a sed pattern), whole.
+nth_line() {
+  printf '%s\n' "$1" | sed -n "/^[0-9]\{4\}-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z: $3/p" | sed -n "${2}p"
+}
+count_lines() {
+  printf '%s\n' "$1" | grep -c "^[0-9]\{4\}-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]Z: $2"
+}
+
+# When a line of a runner's output was written, as seconds: the runner begins it with the time. Now, when it does not.
+line_time() {
+  local stamp at
+  stamp=$(printf '%s\n' "$1" | sed -n 's/^\([0-9]\{4\}-[0-9][0-9]-[0-9][0-9] [0-9][0-9]:[0-9][0-9]:[0-9][0-9]\)Z: .*/\1/p' | head -n1)
+  at=''
+  [ -z "$stamp" ] || at=$(date -u -d "$stamp UTC" +%s 2>/dev/null) || at=''
+  case $at in '' | *[!0-9]*) now ;; *) echo "$at" ;; esac
+}
+
+# A look at a persistent runner (registration-token mode), which takes job after job: every job its output shows as
+# ended since the last look is recorded, and the slot is busy while one has begun and not ended. It reads and sets the
+# variables of the slot_cycle that calls it: $recorded (the jobs of this runner recorded so far), $busy_since, $job and
+# $cpu_mark (the slot's CPU time when the job began). The memory peak recorded is the slot's since its runner started:
+# a slice's peak cannot be set back while it runs.
+persistent_look() {
+  local lines=$1 begun ended start end at peak cpu result seconds
+  begun=$(count_lines "$lines" 'Running job: ')
+  ended=$(count_lines "$lines" 'Job .* completed with result: ')
+  while [ "$recorded" -lt "$ended" ]; do
+    start=$(nth_line "$lines" $((recorded + 1)) 'Running job: ')
+    end=$(nth_line "$lines" $((recorded + 1)) 'Job .* completed with result: ')
+    read -r peak cpu <<<"$(slot_usage "$slot")"
+    job=$(job_name "$start")
+    : "${job:=unknown}"
+    at=$(job_began "$start")
+    [ -z "$start" ] && at=${busy_since:-$started}
+    result=$(printf '%s\n' "$end" | sed -n 's/.*completed with result: \([A-Za-z]*\).*/\1/p')
+    finished=$(line_time "$end")
+    seconds=$((finished - at))
+    [ "$seconds" -ge 0 ] || seconds=0
+    record_job "$slot" "$finished" "$job" "${result:-unknown}" "$seconds" "$peak" $((cpu - ${cpu_mark:-0})) "$name"
+    recorded=$((recorded + 1))
+    busy_since=''
+    job=''
+    cpu_mark=$cpu
+  done
+  if [ "$begun" -gt "$recorded" ] && [ -z "$busy_since" ]; then
+    start=$(nth_line "$lines" "$begun" 'Running job: ')
+    busy_since=$(job_began "$start")
+    job=$(job_name "$start")
+    read -r peak cpu_mark <<<"$(slot_usage "$slot")"
+    set_state "$slot" busy "$name ${job:+job \"$job\"}"
+  elif [ "$begun" -le "$recorded" ] && [ "$ended" -gt 0 ] && [ "$updating" != 1 ]; then
+    # Back to waiting for its next job; the caches are trimmed between jobs, as a fresh runner's are.
+    if [ "$(cut -f1 "$POOL_RUN/slots/$slot" 2>/dev/null)" = busy ]; then
+      set_state "$slot" idle "$name"
+      slot_trim_docker "$slot" "$daemon"
+      slot_trim_dependencies "$slot"
+    fi
+  fi
+}
+
+# Registers slot $1's persistent runner once, in registration-token mode: config.sh in a container of the pool's runner
+# image that ends when it is done. The token reaches it as a file on /run (memory) that its own command reads into
+# the runner's environment (ACTIONS_RUNNER_INPUT_TOKEN, which config.sh reads as --token and takes out of its
+# environment): it is on no command line and in no record of Docker's. The runner's registration (.runner,
+# .credentials, .credentials_rsaparams) is copied out into a new folder under $POOL_STATE/registered, which only root
+# enters (0700), and the folder takes the slot's place only once all three are there (0600, the runner's user's own,
+# for its container to read). --replace takes over a runner of the same name on GitHub: a slot registered again keeps
+# its name. Returns 1 with $REGISTER_ERROR, the words of config.sh's last lines but its trace lines ([RUNNER ...], which
+# the runner image prints too); config.sh shows the token as *** in them, and the words hold none.
+slot_register() {
+  local slot=$1 reg new copy args code out words='' line
+  REGISTER_ERROR=''
+  reg=$(slot_registration "$slot")
+  new="$reg.new"
+  copy="$POOL_RUN/regtoken/$slot"
+  if [ ! -s "$(reg_token)" ]; then
+    REGISTER_ERROR='no registration token is set: an organisation owner makes one under Settings > Actions > Runners > New self-hosted runner, and it is put in the secret GITHUB_REGISTRATION_TOKEN'
+    return 1
+  fi
+  mkdir -p "$POOL_STATE/registered" "$POOL_RUN/regtoken"
+  chmod 700 "$POOL_STATE/registered" "$POOL_RUN/regtoken"
+  rm -rf "${new:?}"
+  mkdir -p "$new"
+  chmod 700 "$new"
+  (umask 077 && tr -d ' \t\r\n' <"$(reg_token)" >"$copy")
+  case $(cat "$copy") in '' | *[!A-Za-z0-9._~+/=-]*)
+    rm -f "$copy"
+    rm -rf "${new:?}"
+    REGISTER_ERROR='the registration token has a character no GitHub token has'
+    return 1
+    ;;
+  esac
+  chmod 400 "$copy"
+  if [ "$(id -u)" = 0 ]; then chown "$RUNNER_UID:$DOCKER_GID" "$new" "$copy"; fi
+  args=(--url "$URL" --name "$name" --work _work)
+  [ -z "$GROUP_NAME" ] || args+=(--runnergroup "$GROUP_NAME")
+  [ -z "${SLOT_REG_LABELS[$slot]}" ] || args+=(--labels "${SLOT_REG_LABELS[$slot]}")
+  out="$POOL_LOGS/register-$slot.log"
+  set_state "$slot" registering "$name with a registration token"
+  docker rm -fv "$POOL_NAME-s$slot-reg" >/dev/null 2>&1
+  # shellcheck disable=SC2016
+  docker run --rm --name "$POOL_NAME-s$slot-reg" --label "arca.pool=$POOL_NAME" \
+    -v "$copy:/run/arca/token:ro" -v "$new:/run/arca/registration" \
+    "$RUNNER_RUN_IMAGE" /bin/bash -c 'ACTIONS_RUNNER_INPUT_TOKEN=$(cat /run/arca/token) && export ACTIONS_RUNNER_INPUT_TOKEN && cd /home/runner && ./config.sh --unattended --replace "$@" && cp .runner .credentials .credentials_rsaparams /run/arca/registration/' \
+    config.sh "${args[@]}" >"$out" 2>&1
+  code=$?
+  rm -f "$copy"
+  if [ "$code" = 0 ] && [ -s "$new/.runner" ] && [ -s "$new/.credentials" ] && [ -s "$new/.credentials_rsaparams" ]; then
+    chmod 600 "$new/.runner" "$new/.credentials" "$new/.credentials_rsaparams"
+    rm -rf "${reg:?}"
+    mv "$new" "$reg"
+    return 0
+  fi
+  rm -rf "${new:?}"
+  while IFS= read -r line; do
+    words="${words:+$words | }$(plain "$line")"
+  done < <(grep -v -e '^[[:space:]]*$' -e '^\[RUNNER ' "$out" 2>/dev/null | tail -n 3)
+  REGISTER_ERROR="config.sh did not register the runner $name (exit $code): ${words:-it said nothing}. Its whole output is in $out inside the machine. A registration token lasts one hour and is made under Settings > Actions > Runners > New self-hosted runner"
+  return 1
 }
 
 # The first part of a slot's life: register a fresh runner and start it, with its own Docker daemon. It sets the
@@ -655,27 +873,40 @@ slot_begin() {
 
   # A slot begun just as the controller was told to stop registers no runner.
   ! stopping || return 1
-  if ! github_token; then
-    slot_failed "$slot" "$TOKEN_ERROR"
-    return 1
-  fi
-  token=$TOKEN
-  TOKEN=''
-  name="$POOL_NAME-$POOL_ID-$class-$slot-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
-  body=$(jq -nc --arg name "$name" --argjson group "$GROUP" --argjson labels "${SLOT_LABELS_JSON[$slot]}" \
-    '{name: $name, runner_group_id: $group, labels: $labels, work_folder: "_work"}')
-  if ! api POST "$SCOPE/actions/runners/generate-jitconfig" "$token" "$body"; then
-    # A token GitHub no longer takes is not kept.
-    [ "$API_CODE" = 401 ] && rm -f "$POOL_RUN/token"
-    slot_failed "$slot" "the runner was not registered: $API_ERROR"
-    return 1
-  fi
-  jit=$(jq -r '.encoded_jit_config // empty' "$API_OUT")
-  runner_id=$(jq -r '.runner.id // empty' "$API_OUT")
-  rm -f "$API_OUT"
-  if [ -z "$jit" ]; then
-    slot_failed "$slot" "GitHub registered the runner without a just-in-time configuration"
-    return 1
+  if [ -n "$REG" ]; then
+    # Registration-token mode: the slot's one runner, registered once and kept.
+    name="$POOL_NAME-$slot"
+    runner_id=''
+    if ! registered "$slot"; then
+      if ! slot_register "$slot"; then
+        slot_failed "$slot" "$REGISTER_ERROR"
+        return 1
+      fi
+      say "slot $slot ($class): the persistent runner $name is registered${GROUP_NAME:+ in runner group \"$GROUP_NAME\"} with the labels ${SLOT_LABELS[$slot]}; its registration is kept in $(slot_registration "$slot")"
+    fi
+  else
+    if ! github_token; then
+      slot_failed "$slot" "$TOKEN_ERROR"
+      return 1
+    fi
+    token=$TOKEN
+    TOKEN=''
+    name="$POOL_NAME-$POOL_ID-$class-$slot-$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+    body=$(jq -nc --arg name "$name" --argjson group "$GROUP" --argjson labels "${SLOT_LABELS_JSON[$slot]}" \
+      '{name: $name, runner_group_id: $group, labels: $labels, work_folder: "_work"}')
+    if ! api POST "$SCOPE/actions/runners/generate-jitconfig" "$token" "$body"; then
+      # A token GitHub no longer takes is not kept.
+      [ "$API_CODE" = 401 ] && rm -f "$POOL_RUN/token"
+      slot_failed "$slot" "the runner was not registered: $API_ERROR"
+      return 1
+    fi
+    jit=$(jq -r '.encoded_jit_config // empty' "$API_OUT")
+    runner_id=$(jq -r '.runner.id // empty' "$API_OUT")
+    rm -f "$API_OUT"
+    if [ -z "$jit" ]; then
+      slot_failed "$slot" "GitHub registered the runner without a just-in-time configuration"
+      return 1
+    fi
   fi
   rm -f "$POOL_RUN/backoff" "$POOL_RUN/backoff-until"
 
@@ -721,14 +952,34 @@ slot_begin() {
   # are writable and not a mount, so the runner can replace them when GitHub tells it to update itself. Its just-in-time configuration is a file on
   # /run that the container's command reads into the runner's environment: Docker's record of the container holds the
   # path, never the configuration.
+  home=()
+  [ -z "$layered" ] || home=(-v "$dir/layer/home:/home/runner")
+  if [ -n "$REG" ]; then
+    # The persistent runner: its registration is mounted read-only from the slot's root-only folder and copied into
+    # the runner's home, where run.sh reads it; run.sh then takes job after job until the container is stopped.
+    # shellcheck disable=SC2016
+    if ! docker run -d --name "$runner" --label "arca.pool=$POOL_NAME" \
+      --cgroup-parent "$slice" --network "container:$daemon" \
+      -e DOCKER_HOST=unix:///var/run/docker.sock \
+      -e RUNNER_TOOL_CACHE=/opt/hostedtoolcache -e POOL_CACHE_DIR=/var/cache/pool \
+      -v "$(slot_registration "$slot"):/run/arca/registration:ro" \
+      -v "$dir/sock:/var/run" "${home[@]}" -v "$dir/work:/home/runner/_work" \
+      -v "$dir/toolcache:/opt/hostedtoolcache" -v "$dir/cache:/var/cache/pool" \
+      "$RUNNER_RUN_IMAGE" /bin/bash -c 'cp /run/arca/registration/.runner /run/arca/registration/.credentials /run/arca/registration/.credentials_rsaparams /home/runner/ && exec /home/runner/run.sh' >/dev/null 2>&1; then
+      slot_abandon "$slot" ''
+      slot_failed "$slot" "the runner container could not be started"
+      return 1
+    fi
+    started=$(now)
+    set_state "$slot" idle "$name"
+    return 0
+  fi
   mkdir -p "$POOL_RUN/jit"
   chmod 700 "$POOL_RUN/jit"
   (umask 077 && printf '%s' "$jit" >"$POOL_RUN/jit/$slot")
   chmod 400 "$POOL_RUN/jit/$slot"
   if [ "$(id -u)" = 0 ]; then chown "$RUNNER_UID:$DOCKER_GID" "$POOL_RUN/jit/$slot"; fi
   jit=''
-  home=()
-  [ -z "$layered" ] || home=(-v "$dir/layer/home:/home/runner")
   # shellcheck disable=SC2016
   if ! docker run -d --name "$runner" --label "arca.pool=$POOL_NAME" \
     --cgroup-parent "$slice" --network "container:$daemon" \
@@ -756,7 +1007,11 @@ slot_adopt() {
     read -r started
     read -r busy_since
     read -r job
+    read -r recorded
+    read -r cpu_mark
   } <"$dir/kept"
+  case $recorded in '' | *[!0-9]*) recorded=0 ;; esac
+  case $cpu_mark in '' | *[!0-9]*) cpu_mark=0 ;; esac
   case $started in '' | *[!0-9]*) started=$(now) ;; esac
   case $busy_since in '' | *[!0-9]*) busy_since=$started ;; esac
   : "${job:=unknown}"
@@ -771,18 +1026,19 @@ slot_keep() {
   local now_state
   now_state=$(docker inspect -f '{{.State.Running}} {{.State.ExitCode}}' "$runner" 2>/dev/null) || return 1
   [ "${now_state%% *}" = true ] || return 1
-  printf '%s\n' "$name" "$runner_id" "$layered" "$started" "$busy_since" "$job" >"$dir/kept.new" &&
+  printf '%s\n' "$name" "$runner_id" "$layered" "$started" "$busy_since" "$job" "$recorded" "$cpu_mark" >"$dir/kept.new" &&
     mv "$dir/kept.new" "$dir/kept" || return 1
   say "slot $slot ($class): its runner is at its job \"$job\" and is left to finish it; the controller that starts next records it"
 }
 
 # One life of a slot: register a fresh runner, run it, record its job, clean up. It ends when the runner has gone, so
-# the controller starts the slot again with a new registration.
+# the controller starts the slot again with a new registration. In registration-token mode the runner is the slot's
+# persistent one: it is watched through job after job, and the slot ends only when its container does.
 slot_cycle() {
   local slot=$1
   local class=${SLOT_CLASS[$slot]} dir runner daemon slice token name body jit runner_id tries state code
   local started busy_since='' job='' result='' peak cpu seconds finished cgroup updating='' layered='' home=() lines
-  local retired='' asked=''
+  local retired='' asked='' recorded=0 cpu_mark=0
   # A slot takes no signal. It reads the same line as the controller: a slot begun as the controller is told to stop
   # finds the stop at once.
   trap - TERM INT
@@ -804,13 +1060,19 @@ slot_cycle() {
     # That line is what marks the slot busy. (The slot was once asked for the runner's processes instead, in a form
     # Docker refuses, so a running job was shown as idle.) The output is read only until the job has begun.
     lines=''
-    [ -n "$busy_since" ] || lines=$(docker logs "$runner" 2>&1)
-    case $lines in *'Running job: '*)
-      busy_since=$(job_began "$lines")
-      job=$(job_name "$lines")
-      set_state "$slot" busy "$name ${job:+job \"$job\"}"
-      ;;
-    esac
+    if [ -n "$REG" ]; then
+      # A persistent runner's output is read at every look: it begins and ends job after job.
+      lines=$(docker logs "$runner" 2>&1)
+      persistent_look "$lines"
+    else
+      [ -n "$busy_since" ] || lines=$(docker logs "$runner" 2>&1)
+      case $lines in *'Running job: '*)
+        busy_since=$(job_began "$lines")
+        job=$(job_name "$lines")
+        set_state "$slot" busy "$name ${job:+job \"$job\"}"
+        ;;
+      esac
+    fi
     # GitHub tells a runner older than its newest release to update itself before it takes a job. It does so inside
     # its own container; the pool says it once per runner, because every fresh runner will until the pin moves.
     if [ -z "$updating" ] && [ -z "$busy_since" ] && [[ $lines == *'Runner update in progress'* ]]; then
@@ -856,6 +1118,29 @@ slot_cycle() {
   fi
 
   code=${state##* }
+  if [ -n "$REG" ]; then
+    # The persistent runner has stopped: the jobs it ended since the last look are recorded, and one it was at when
+    # it stopped is recorded with the result unknown.
+    lines=$(docker logs "$runner" 2>&1)
+    persistent_look "$lines"
+    lines=''
+    if [ -n "$busy_since" ]; then
+      finished=$(runner_finished "$runner")
+      read -r peak cpu <<<"$(slot_usage "$slot")"
+      seconds=$((finished - busy_since))
+      [ "$seconds" -ge 0 ] || seconds=0
+      record_job "$slot" "$finished" "${job:-unknown}" unknown "$seconds" "$peak" $((cpu - cpu_mark)) "$name"
+      recorded=$((recorded + 1))
+    fi
+    slot_reap "$slot"
+    if [ "$recorded" -gt 0 ]; then
+      say "slot $slot ($class): its persistent runner $name stopped (exit $code) after $recorded jobs; it is started again with its registration"
+      return 0
+    fi
+    slot_failed "$slot" "its persistent runner $name stopped (exit $code) before it took a job. If its registration was removed on GitHub, remove $(slot_registration "$slot") inside the machine and put a new registration token in GITHUB_REGISTRATION_TOKEN"
+    [ -z "$layered" ] || [ "$updating" = finished ] || plain_home "A runner stopped before its first job with its files layered"
+    return 0
+  fi
   finished=$(runner_finished "$runner")
   # A job shorter than one look is still found in the runner's own lines, with the time it began.
   lines=$(docker logs "$runner" 2>&1)
@@ -874,11 +1159,7 @@ slot_cycle() {
     [ "$seconds" -ge 0 ] || seconds=0
     : "${result:=unknown}"
     : "${job:=unknown}"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s.%s\t%s\n' \
-      "$(date -u -d "@$finished" +%Y-%m-%dT%H:%M:%SZ)" "$slot" "$class" "${SLOT_LABELS[$slot]}" "$job" "$result" \
-      "$seconds" "$peak" $((cpu / 1000000)) $(((cpu % 1000000) / 100000)) "$name" >>"$POOL_LOGS/jobs.tsv"
-    printf x >>"$POOL_RUN/jobs"
-    say "job slot=$slot class=$class labels=${SLOT_LABELS[$slot]} name=\"$job\" result=$result seconds=$seconds peak_memory_mib=$(mib "$peak") cpu_seconds=$((cpu / 1000000)).$(((cpu % 1000000) / 100000)) runner=$name"
+    record_job "$slot" "$finished" "$job" "$result" "$seconds" "$peak" "$cpu" "$name"
     slot_reap "$slot"
   else
     slot_reap "$slot"
@@ -1489,6 +1770,37 @@ give_a_place() {
   CLASS_NOTE="$names. Slot $give (${SLOT_CLASS[$give]}) gives up its idle runner's place for it$last"
 }
 
+# Registration-token mode: says which slots have no registration and wait for a token, when any do.
+reg_waiting() {
+  local slot missing=''
+  for ((slot = 0; slot < SLOTS; slot++)); do registered "$slot" || missing="${missing:+$missing, }$slot"; done
+  [ -n "$missing" ] || return 0
+  if [ -s "$(reg_token)" ]; then
+    say "slots $missing have no registration yet and are registered with the registration token"
+  else
+    say "slots $missing have no registration yet: they wait for a registration token, which an organisation owner makes under Settings > Actions > Runners > New self-hosted runner and which is put in the secret GITHUB_REGISTRATION_TOKEN (service_secret_set, then instance_start, or as the file $(reg_token) inside the machine, mode 0600). Slots that have one start without it"
+  fi
+}
+
+# Registration-token mode: the token is deleted once every slot has its registration, or once it has outlived
+# POOL_TOKEN_LIFE seconds, after which GitHub no longer takes it. Said once each time.
+reg_token_done() {
+  local file age
+  file=$(reg_token)
+  [ -e "$file" ] || return 0
+  if all_registered; then
+    rm -f "$file"
+    say "the registration token is deleted: every slot has its registration"
+    return 0
+  fi
+  age=$(($(now) - $(stat -c %Y "$file" 2>/dev/null || now)))
+  if [ "$age" -ge "$POOL_TOKEN_LIFE" ]; then
+    rm -f "$file"
+    say "the registration token is deleted: it is $age seconds old, and GitHub's last one hour"
+    reg_waiting
+  fi
+}
+
 # The controller: everything the pool does, as a child of run_pool. It takes no signal. It learns of a stop from the
 # line, and then stops in its own order. A SIGTERM sent to this process itself ends it at once with no stop; nothing
 # sends one under the unit's KillMode=mixed. It does not ignore the signal instead, because everything it starts,
@@ -1546,7 +1858,8 @@ pool() {
   write_slices
 
   local waited=0
-  while ! stopping && [ -z "$(credential_kind)" ]; do
+  # In registration-token mode the pool has no credential to wait for: a slot waits for its token alone (below).
+  while ! stopping && [ -z "$REG" ] && [ -z "$(credential_kind)" ]; do
     if [ $((waited % 60)) = 0 ]; then
       say "waiting for a credential: set GITHUB_APP_CLIENT_ID and GITHUB_APP_PRIVATE_KEY, or GITHUB_TOKEN, with service_secret_set, then run instance_start"
     fi
@@ -1554,7 +1867,9 @@ pool() {
     waited=$((waited + 5))
   done
   ! stopping || return 0
-  if [ "$(credential_kind)" = app ] && [ -s "$(secret_file GITHUB_TOKEN)" ]; then
+  if [ -n "$REG" ]; then
+    [ -z "$(credential_kind)" ] || say "registration-token mode: GITHUB_APP_CLIENT_ID, GITHUB_APP_PRIVATE_KEY and GITHUB_TOKEN are not read"
+  elif [ "$(credential_kind)" = app ] && [ -s "$(secret_file GITHUB_TOKEN)" ]; then
     say "signing in as the GitHub App: GITHUB_TOKEN is set too and is not used"
   fi
   until prepare_images; do
@@ -1577,8 +1892,14 @@ pool() {
   find_kept
   clean_containers
   # No slot starts before GitHub takes the credential: a wrong one is said here, once per pause, not once per slot.
-  local pause=0
-  until github_token; do
+  # In registration-token mode the pool has none and asks GitHub nothing: each runner registers and connects itself.
+  local pause=0 verdict
+  if [ -n "$REG" ]; then
+    GROUP_NOTE="${GROUP_NAME:+runner group \"$GROUP_NAME\", }registration-token mode: one persistent runner per slot, registered once, which keeps its container, work directory and caches between jobs"
+    say "registering runners in $GROUP_NOTE"
+    reg_waiting
+  fi
+  until [ -n "$REG" ] || github_token; do
     ! stopping || return 0
     printf x >>"$POOL_RUN/failures"
     pause=$((pause == 0 ? 5 : pause * 2))
@@ -1590,8 +1911,7 @@ pool() {
   ! stopping || return 0
   # Nor before its runner group is one a pool may use. A refusal is told again every POOL_REFUSE_EVERY seconds, so it
   # stays on the console; only a pool created with other settings ends it.
-  local verdict
-  while :; do
+  while [ -z "$REG" ]; do
     github_token || {
       ! stopping || return 0
       printf x >>"$POOL_RUN/failures"
@@ -1609,8 +1929,10 @@ pool() {
     if [ "$verdict" = 1 ]; then nap "$POOL_REFUSE_EVERY"; else nap "$POOL_BACKOFF_MAX"; fi
     ! stopping || return 0
   done
-  say "registering runners in $GROUP_NOTE"
-  clean_runners "$TOKEN"
+  if [ -z "$REG" ]; then
+    say "registering runners in $GROUP_NOTE"
+    clean_runners "$TOKEN"
+  fi
   TOKEN=''
   GROUP_HOLD=''
   local last_group
@@ -1655,7 +1977,8 @@ pool() {
     case $until_at in '' | *[!0-9]*) until_at=0 ;; esac
     available=$(meminfo_bytes MemAvailable)
     pending=0
-    give_a_place
+    [ -z "$REG" ] || reg_token_done
+    [ -n "$REG" ] || give_a_place
     # Admission. A slot starts only while there is a place under the cap and memory for its whole size: memory that
     # no other slot has reserved, and memory the machine has free now. CPU is not reserved. Every slot without a
     # runner is looked at once in a pass. A place goes to the class with the fewest runners first, so every class has
@@ -1667,7 +1990,9 @@ pool() {
     while next_slot; do
       # No slot is begun once the controller is told to stop.
       ! stopping || break
-      if [ -z "$(credential_kind)" ]; then
+      if [ -n "$REG" ] && ! registered "$slot" && [ ! -s "$(reg_token)" ]; then
+        WAIT[slot]='waiting for a registration token (GITHUB_REGISTRATION_TOKEN)'
+      elif [ -z "$REG" ] && [ -z "$(credential_kind)" ]; then
         WAIT[slot]='waiting for a credential'
       elif [ -n "$GROUP_HOLD" ]; then
         WAIT[slot]='held: its runner group is refused now (see the pool line)'
@@ -1693,7 +2018,7 @@ pool() {
     # What GitHub says about the runner group (or the repository) can change after the pool has started: it is read
     # again every POOL_GROUP_EVERY seconds. A group that has become one the pool refuses holds every new slot until
     # it is put right; runners that already wait or work are left. A warning shows in the next status block.
-    if [ $((at - last_group)) -ge "$POOL_GROUP_EVERY" ]; then
+    if [ -z "$REG" ] && [ $((at - last_group)) -ge "$POOL_GROUP_EVERY" ]; then
       last_group=$at
       if github_token; then
         check_runner_group "$TOKEN"
@@ -1722,7 +2047,11 @@ pool() {
 
   # The slots have read the same line: each is cleaning up already. They are sent no signal, which would end them
   # in the middle of it.
-  say "stopping: runners without a job are taken off GitHub, and a runner at its job is left to finish it: the controller that starts next records it"
+  if [ -n "$REG" ]; then
+    say "stopping: runners without a job are stopped and keep their registration for the next start, and a runner at its job is left to finish it: the controller that starts next records it"
+  else
+    say "stopping: runners without a job are taken off GitHub, and a runner at its job is left to finish it: the controller that starts next records it"
+  fi
   local deadline=$(($(now) + POOL_STOP_WAIT))
   for slot in "${!PIDS[@]}"; do
     [ -n "${PIDS[$slot]}" ] || continue
