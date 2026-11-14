@@ -1620,6 +1620,46 @@ mod osd_readings {
     }
 
     #[test]
+    fn the_update_state_is_taken_with_the_osd_read_and_carried_between_reads() {
+        let docs = Docs::default();
+        let mut sampler = sampler_over(&docs);
+        assert!(
+            sampler.os_update().is_none(),
+            "no state before the first read"
+        );
+        docs.serve(
+            security(),
+            json!({
+                "config": { "channel": "stable", "check_frequency": "6h" },
+                "state": {
+                    "status": "OS update check completed",
+                    "last_check": "2026-11-01T10:00:00Z",
+                    "needs_reboot": false,
+                    "health": { "current_version": "202611010000" },
+                },
+            }),
+        );
+        sampler.sample(CHECKED);
+        let state = sampler.os_update().expect("the first read").clone();
+        assert!(state.known);
+        assert_eq!(state.as_of, CHECKED);
+        assert_eq!(state.version.as_deref(), Some("202611010000"));
+        assert_eq!(state.channel.as_deref(), Some("stable"));
+        assert_eq!(state.last_success_at, Some(CHECKED));
+        docs.down();
+        sampler.sample(CHECKED + 5_000);
+        assert_eq!(
+            sampler.os_update(),
+            Some(&state),
+            "between reads the state is carried, not read again"
+        );
+        sampler.sample(CHECKED + 300_000);
+        let state = sampler.os_update().expect("the next read");
+        assert!(!state.known, "a failed read is not known, never an error");
+        assert_eq!(state.as_of, CHECKED + 300_000);
+    }
+
+    #[test]
     fn a_plain_incus_that_answers_404_gives_no_osd_reading() {
         let docs = Docs::default();
         let mut sampler = sampler_over(&docs);

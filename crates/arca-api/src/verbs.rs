@@ -83,7 +83,7 @@ impl Verb {
     }
 }
 
-static VERBS: [Verb; 68] = [
+static VERBS: [Verb; 70] = [
     Verb {
         name: "arca_status",
         summary: "Node status: the API version, the node id, the mode, the uptime, whether Incus answers and the last applied sequence number.",
@@ -408,7 +408,7 @@ static VERBS: [Verb; 68] = [
     },
     Verb {
         name: "service_update",
-        summary: "Move a running container service made from an image by digest to another digest of that image in one call (or, with follow, say whether the node moves an Automagik server by itself): it is stopped, its root rebuilt from the new digest (data volume, config, secrets and firewall rules are kept), started, and checked within the timeout (120 seconds unless timeoutSeconds says otherwise). On any failure the old version is put back. A service whose template declares a data volume it lacks would lose its data: it is refused before any change, unless eraseData, which needs the owner's approval through action_propose.",
+        summary: "Move a running container service made from an image by digest, or a local image pinned by fingerprint, to another digest or fingerprint in one call (or, with follow, say whether the node moves an Automagik server by itself): it is stopped, its root rebuilt from the new image (data volume, config, secrets and firewall rules are kept), started, and checked within timeoutSeconds (120 by default). On any failure the old version is put back. A local image must already be in the service project's image store. A service whose template declares a data volume it lacks would lose its data: it is refused before any change, unless eraseData, which needs the owner's approval through action_propose.",
         class: VerbClass::L,
         min_scope: Scope::Doctor,
         writes: true,
@@ -1041,7 +1041,177 @@ static VERBS: [Verb; 68] = [
         params: host_network_restore_params,
         result: host_network_restore_result,
     },
+    Verb {
+        name: "instance_move_preflight",
+        summary: "Before any move: whether a linked host can take each instance, one go/no-go row per instance in input order. Each row checks the instance's measured size against the target pool's free space less the earlier instances of the call, the storage driver change, the CPU features (all of them for a live move), devices the target lacks, networks and fixed addresses, projects, profiles and ACLs, proxies listening on this host's own address, and macvlan parent names, each ok or the reason it is not with what to do. It only reads: nothing is stopped, copied, created or recorded.",
+        class: VerbClass::L,
+        min_scope: Scope::Viewer,
+        writes: false,
+        destructive: false,
+        untrusted: false,
+        output_key: None,
+        summary_text: summary_move_preflight,
+        cut: no_cut,
+        params: instance_move_preflight_params,
+        result: instance_move_preflight_result,
+    },
+    Verb {
+        name: "os_update",
+        summary: "The node's OS update state: the version, channel, check frequency, automatic updates, the last check and update, and the OS's own error kind and update-key trust. Read every 5 minutes; known is false on a node that is not Arca OS.",
+        class: VerbClass::L,
+        min_scope: Scope::Viewer,
+        writes: false,
+        destructive: false,
+        untrusted: true,
+        output_key: None,
+        summary_text: summary_os_update,
+        cut: no_cut,
+        params: os_update_params,
+        result: os_update_result,
+    },
 ];
+
+/// The checks of every `instance_move_preflight` row, in the order each row lists them.
+pub const MOVE_PREFLIGHT_CHECKS: [&str; 8] = [
+    "size",
+    "storageDriver",
+    "cpu",
+    "devices",
+    "networks",
+    "projectsProfilesAcls",
+    "proxyListen",
+    "macvlanParents",
+];
+
+fn instance_move_preflight_params() -> Value {
+    let reference = params(vec![
+        (
+            "project",
+            true,
+            json!({
+                "description": "The Incus project the instance is in, on this node.",
+                "maxLength": 63,
+                "minLength": 1,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$",
+                "type": "string"
+            }),
+        ),
+        ("name", true, instance_name_schema()),
+    ]);
+    params(vec![
+        (
+            "instances",
+            true,
+            json!({
+                "description": "The instances to check, in the order the rows answer them: 1 to 50 references. One instance is a list of one. An earlier instance whose size fits counts as already destined for the target when a later one is sized.",
+                "items": reference,
+                "maxItems": 50,
+                "type": "array"
+            }),
+        ),
+        (
+            "target",
+            true,
+            json!({
+                "description": "The target node: the name of one of this kernel's linked hosts (approval.linkedHosts). Its facts are read through that host's incusSocket.",
+                "maxLength": 253,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$",
+                "type": "string"
+            }),
+        ),
+        (
+            "live",
+            false,
+            json!({
+                "description": "Check for a live (stateful) move: the target's CPU must then have every CPU feature of this host. Absent or false, a cold move, where a missing feature is a risk and not a blocker.",
+                "type": "boolean"
+            }),
+        ),
+    ])
+}
+
+fn instance_move_preflight_result() -> Value {
+    let finding = result(vec![
+        ("subject", true, string()),
+        ("ok", true, boolean()),
+        ("detail", true, string()),
+        ("proposal", true, nullable(string())),
+    ]);
+    let measure = result(vec![
+        ("method", true, nullable_enum(&["walked"])),
+        ("path", true, nullable(string())),
+        ("instanceBytes", true, nullable(int())),
+        ("snapshotBytes", true, nullable(int())),
+        ("volumeBytes", true, nullable(int())),
+        ("hostFolderBytes", true, nullable(int())),
+        ("notMeasured", true, nullable(string())),
+        ("measuredBytes", true, nullable(int())),
+        ("headroomBytes", true, nullable(int())),
+        ("neededBytes", true, nullable(int())),
+        ("neededWithoutSnapshotsBytes", false, nullable(int())),
+        ("fitsWithoutSnapshots", false, nullable(boolean())),
+        ("sourcePool", true, nullable(string())),
+        ("targetPool", true, nullable(string())),
+        ("targetFreeBytes", true, nullable(int())),
+        ("pendingBytes", true, int()),
+        ("pendingFor", true, array(string())),
+        ("availableBytes", true, nullable(int())),
+    ]);
+    let check = result(vec![
+        ("check", true, one_of(&MOVE_PREFLIGHT_CHECKS)),
+        ("ok", true, boolean()),
+        ("detail", true, string()),
+        ("findings", true, array(finding)),
+        ("risks", true, array(string())),
+        ("measure", false, measure),
+        ("sourceDriver", false, nullable(string())),
+        ("targetDriver", false, nullable(string())),
+        ("crossesDriver", false, nullable(boolean())),
+        ("live", false, boolean()),
+        ("missingFeatures", false, array(string())),
+        ("sourceBaseline", false, nullable(string())),
+        ("targetBaseline", false, nullable(string())),
+    ]);
+    let row = result(vec![
+        ("project", true, string()),
+        ("name", true, string()),
+        ("target", true, string()),
+        ("go", true, boolean()),
+        ("reason", true, nullable(string())),
+        ("checks", true, array(check)),
+    ]);
+    result(vec![
+        (
+            "target",
+            true,
+            result(vec![
+                ("name", true, string()),
+                ("reachable", true, boolean()),
+                ("reason", true, nullable(string())),
+            ]),
+        ),
+        ("live", true, boolean()),
+        ("rows", true, array(row)),
+    ])
+}
+
+/// A short line for a successful `instance_move_preflight`.
+pub fn summary_move_preflight(v: &Value) -> String {
+    let rows = v["rows"].as_array().map_or(&[][..], Vec::as_slice);
+    let go = rows.iter().filter(|row| row["go"] == true).count();
+    let target = v["target"]["name"].as_str().unwrap_or("?");
+    let unread = if v["target"]["reachable"] == false {
+        " (the target could not be read)"
+    } else {
+        ""
+    };
+    format!(
+        "{} instance(s) to {target}: {go} go, {} no-go{unread}",
+        rows.len(),
+        rows.len() - go
+    )
+}
 
 fn host_network_restore_params() -> Value {
     params(vec![("approval", true, approval_schema())])
@@ -1752,6 +1922,18 @@ pub fn summary_status(v: &Value) -> String {
     )
 }
 
+/// A short line for a successful `os_update`: the version and channel, or that the node reports no update state.
+pub fn summary_os_update(v: &Value) -> String {
+    if v["known"].as_bool() != Some(true) {
+        return "this node does not report update state".to_string();
+    }
+    format!(
+        "OS {} on channel {}",
+        v["version"].as_str().unwrap_or("unknown"),
+        v["channel"].as_str().unwrap_or("unknown")
+    )
+}
+
 /// A short line for a successful `node_metrics`.
 pub fn summary_metrics(v: &Value) -> String {
     format!("host metrics for {} minute(s)", v["minutes"])
@@ -2159,6 +2341,48 @@ fn node_metrics_result() -> Value {
         ("minutes", true, int()),
         ("latest", true, nullable(host_sample())),
         ("mean", true, nullable(host_sample())),
+    ])
+}
+
+fn os_update_params() -> Value {
+    params(vec![])
+}
+
+fn os_update_result() -> Value {
+    let text = || nullable(string());
+    let ms = || nullable(int());
+    result(vec![
+        ("known", true, boolean()),
+        ("asOf", true, int()),
+        ("version", true, text()),
+        ("channel", true, text()),
+        ("checkFrequency", true, text()),
+        ("automatic", true, nullable(boolean())),
+        ("lastCheckAt", true, ms()),
+        ("lastSuccessAt", true, ms()),
+        ("lastUpdatedVersion", true, text()),
+        ("lastUpdatedAt", true, ms()),
+        ("needsReboot", true, nullable(boolean())),
+        ("pendingVersion", true, text()),
+        ("previousVersion", true, text()),
+        ("goodVersion", true, text()),
+        ("lastResult", true, text()),
+        ("lastReason", true, text()),
+        (
+            "lastErrorKind",
+            true,
+            nullable_enum(&["network", "parse", "signature", "trust", "other"]),
+        ),
+        (
+            "trust",
+            true,
+            nullable(result(vec![
+                ("embeddedCaFingerprint", true, text()),
+                ("presentedCaFingerprint", true, text()),
+                ("failures", true, nullable(at_least(0))),
+                ("escalated", true, nullable(boolean())),
+            ])),
+        ),
     ])
 }
 
@@ -3851,7 +4075,7 @@ pub fn summary_service_update(v: &Value) -> String {
     if v.get("follow").is_some() {
         "Service's follow setting changed.".to_string()
     } else if v["updated"] == false {
-        "Service already on that digest.".to_string()
+        "Service already runs that image.".to_string()
     } else if v.get("noNewPrivileges").is_some() {
         "Service's no-new-privileges setting changed.".to_string()
     } else {
@@ -3874,7 +4098,7 @@ fn service_update_params_base() -> Value {
                 "type": "string"
             },
             "digest": {
-                "description": "The image digest to move to: sha256: and 64 lower-case hex digits. The service keeps its image's repository. Give it, or follow, not both.",
+                "description": "The image to move to: sha256: and 64 lower-case hex digits. For an OCI image, the digest, and the service keeps its image's repository; for a service made from a local image pinned by fingerprint, the new image's fingerprint. Give it, or follow, not both.",
                 "pattern": "^sha256:[0-9a-f]{64}$",
                 "type": "string"
             },

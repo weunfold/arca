@@ -884,11 +884,12 @@ fn through_the_mcp_door_a_doctor_starts_and_a_stop_needs_the_owners_approval() {
     // A viewer is not offered any of the three, and a call is forbidden.
     let (_, listed) = door.rpc(&door.viewer, "tools/list", json!({}));
     let viewer_tools = listed["result"]["tools"].as_array().expect("tools");
-    assert!(
-        viewer_tools
-            .iter()
-            .all(|tool| !tool["name"].as_str().unwrap_or("").starts_with("instance_"))
-    );
+    assert!(viewer_tools.iter().all(|tool| {
+        !matches!(
+            tool["name"].as_str().unwrap_or(""),
+            "instance_start" | "instance_stop" | "instance_restart"
+        )
+    }));
     let (status, _) = door.call(&door.viewer, "instance_start", at(PROJECT, "web"));
     assert_eq!(status, 403);
     assert_eq!(rig.status(PROJECT, "web"), "Stopped");

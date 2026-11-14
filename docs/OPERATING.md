@@ -186,7 +186,7 @@ refused without the value being echoed back.
 | `canvasOrigin` | no | The loopback DSH origin the remote canvas proxies: an `http://` literal loopback IP and port, with no path. Default `http://127.0.0.1:3081`; any other origin refuses the config before `serve` listens. |
 | `approval.trustOwnerKeysFrom` | no | Absolute paths of other kernels' owner passkeys files on this machine, which this kernel also trusts, read-only, for action approvals only (never to change its own passkeys). See "Approving on another kernel of this machine". |
 | `approval.origins` | with `trustOwnerKeysFrom` | The page origins (`approvalOrigin` form) a passkey from those files may answer from. A line for any other origin is not trusted. |
-| `approval.linkedHosts` | no | `[{ "name": "<host>", "socket": "<path>", "tokenFile": "<path>" }]`: the kernels on this machine whose proposals this kernel's approval page lists and relays approvals to. |
+| `approval.linkedHosts` | no | `[{ "name": "<host>", "socket": "<path>", "tokenFile": "<path>", "incusSocket": "<path>" }]`: the kernels on this machine whose proposals this kernel's approval page lists and relays approvals to. The optional `incusSocket` is that host's Incus socket on this machine (local, or forwarded to a path here); `instance_move_preflight` reads the host through it, with GETs only. |
 
 The config is refused, with exit 2, when:
 
@@ -864,9 +864,17 @@ upgrade, as any shipped template nobody edited. A service made before keeps runn
 is its own instance, and the upgrade does not touch it. Its `service_status` shows the newer release under `update`
 (`"state": "differs"`, the new digest as `templatePin`). A new service pulls 3.136.4.
 
-Keep a running service on the release it has: Arca has no way yet to move one to its template's version in place.
-The only way today is a `service_remove` and a `service_create`, and the remove deletes the service's data, which
-Arca cannot put back into the new service:
+Keep a running service on the release it has, unless you move it yourself: Arca does not move one to its template's
+version by itself. A container moves in place with `service_update {name, digest}`: to the digest an OCI template now
+names, or, for a service made from a local image pinned by fingerprint, to that image's fingerprint, which must
+already be in the service project's image store. An update in place needs an image pinned by digest or fingerprint, a
+template port for the health check, and the service's data on a declared volume (a template `data` path): the rebuild
+replaces the root, so whatever the service keeps there is gone, and a service whose template declares a volume it does
+not have is refused. A service that keeps data on its root, whose image is not pinned, or whose template declares no
+port, is not updatable in place: copy the data out, or create a new service. Keep the old image in the store until the
+update has succeeded, since a rollback in a project without snapshots rebuilds the old root from it. A virtual machine
+has no update path: the way is a `service_remove` and a `service_create`, and the remove deletes the service's data,
+which Arca cannot put back into the new service:
 
 - The server's `/data` is its own volume, `<name>-data`, which `service_remove` deletes with the instance. A snapshot
   of the instance leaves that volume out; it needs its own: `snapshot_create` with `{project: "arcak-svc", volume:
@@ -1576,17 +1584,19 @@ record is refused.
 ### Updating a service to a new image digest
 
 `service_update` takes `{name, digest, timeoutSeconds?, eraseData?, tenant?}` (or `{name, follow}`, see below) and
-moves a running container service made from an image by digest (today `automagik-server`) to another digest of the
-same image in one call. It is a destructive verb (it takes the optional `confirm`), needs a `doctor` token and asks
-the owner for nothing, except for `eraseData` (see below); it works inside a tenant as outside one. There is no
-update path for `automagik-workspace` yet: it is a virtual machine, whose Docker pulls its own server image, and the
-verb refuses it. In order, each step a line in `service-updates.jsonl` in the
+moves a running container service made from an image by digest (today `automagik-server`) or from a local image
+pinned by fingerprint (a template's `local:<alias>` beside a `digest`, see "A local image may be pinned") to another
+digest, or fingerprint, in one call. It is a destructive verb (it takes the optional `confirm`), needs a `doctor`
+token and asks the owner for nothing, except for `eraseData` (see below); it works inside a tenant as outside one.
+There is no update path for `automagik-workspace` yet: it is a virtual machine, whose Docker pulls its own server
+image, and the verb refuses it. In order, each step a line in `service-updates.jsonl` in the
 state directory (an append-only file of JSON lines: a `begin`, one line per step, an `end`; never a secret):
 
 1. the instance is stopped, if it runs, and a snapshot of it, `pre-update-<time>`, is taken where the project allows
    one. No project Arca makes does (each is restricted, and Incus answers that it does not allow snapshot creation),
    so on a node as Arca makes it there is no snapshot, and the answer's `snapshot` is `null`;
-2. its root is rebuilt from `<repository>@<digest>`; Incus may take up to 10 minutes to fetch the image. Incus keeps
+2. its root is rebuilt from `<repository>@<digest>`, or, for a local pinned image, from the project's own copy of the
+   image whose fingerprint is `digest`; Incus may take up to 10 minutes to fetch an OCI image. Incus keeps
    what is not the root: the config, the secrets, the firewall rules and the data volume (a template's `data`
    path, `/data` for `automagik-server`). Whatever the old version wrote to its own root is gone, so **an update of a
    service that keeps its data on its root disk is refused** (see "A service that keeps its data inside the
@@ -1608,10 +1618,25 @@ the old version is started as it is, and the refusal says so. If Incus does not 
 rolled back, so as not to rebuild twice at once: the refusal is `update_unsettled`, and the same update may be asked
 for again once Incus is idle. If the old version cannot be put back, the refusal is `rollback_failed`, says so, and
 leaves the service stopped. A failure before anything is changed (the digest is malformed, the service is not made
-from an image by digest, its instance is not the one Arca created, it has never been started, the snapshot failed for
+from an image by digest or a local image pinned by fingerprint, the image a local update names is not in the service
+project's image store, its instance is not the one Arca created, it has never been started, the snapshot failed for
 a reason other than the project not allowing one) says "Nothing was changed". A call for the digest the service
 already runs changes nothing and answers `updated: false`. A service being updated refuses a second update until
 the first ends. The call is synchronous and can take several minutes: the journal keeps what it did.
+
+A local image is moved by fingerprint: the call's `digest` is the new image's fingerprint (`sha256:` and 64 lower-case
+hex digits, as Incus writes it), and the image must be in the service project's own image store before anything is
+changed. The node reads that store first and refuses, before it stops the service and with "Nothing was changed", when
+no image there has that fingerprint, saying how to put it there (`incus image copy <image> local: --alias <alias>
+--project arcak-svc`, or a build in that project). `action_propose` does not read the image store: a card made before
+the image is put there can be approved, and its run is then refused before anything is changed. The record's alias
+becomes the installed template's alias when that template pins the same fingerprint, and stays what it was otherwise;
+the fingerprint decides which image Incus uses. **Keep the old image in the store until the update has succeeded**: a
+rollback in a project that allows no snapshot rebuilds the old root from the old fingerprint. If that image is gone, a
+rollback after a failed start or health check answers `rollback_failed`; after a failed new rebuild the old root was
+never taken away, so the answer is `rolled_back` with the old root kept. A project that allows snapshots restores the
+snapshot instead, and the record still names the old image either way. The update rebuilds from the project's own copy,
+never from an alias alone; a rebuild from an image the store no longer holds fails before it takes the old root away.
 
 #### A service that keeps its data inside the container
 
@@ -1797,7 +1822,7 @@ unix socket. The verbs
 in this build are `arca_status`, `node_metrics`, `watch_report`, `alerts_list`, `token_list`, `journal_list`, `plan_list`,
 `action_propose`, `plan_decline`, `approval_submit`, `action_approve`, `peer_keys_sync`, the Postgres and ontology verbs, `service_create`, `service_list` and
 `service_status`, `gpu_attach` and `gpu_detach`, `storage_list`, `storage_add`, `snapshot_create`, `snapshot_list` and
-`snapshot_delete`, and `instance_start`, `instance_stop` and `instance_restart`.
+`snapshot_delete`, `instance_start`, `instance_stop` and `instance_restart`, and `instance_move_preflight`.
 
 The unix socket serves only a peer whose credentials carry the server's own uid. Any other peer is closed before a byte of
 its request is read.
@@ -1881,7 +1906,69 @@ What this is not: a client's `accept` is the client's answer. A hook of the clie
 can answer a form with no dialog) can give it with no person at the keyboard, so the admin token is a standing right to
 approve, held by whoever holds the token and its client. Keep it to the one terminal that should have it, and `arca
 token mint --replace` when it moves. Step-up authorization (a `403 insufficient_scope` that sends the person to the
-authorization server) would put the approval where the server can tell a person approved; it is not built here.
+authorization server) puts the approval where the server can tell a person approved; it is built for apps connected by
+their URL (next section), and never grants `admin`.
+
+### Connecting an app by its URL (MCP authorization)
+
+A node with an approval page (`approvalOrigin`) is also the OAuth 2.1 authorization server of its own MCP door, as the MCP
+specification's authorization chapter asks (revision 2025-11-25; 2026-07-28 keeps it). An MCP client such as Claude Code
+or Claude Desktop is given only the URL, `<approvalOrigin>/mcp`. Nobody copies a token.
+
+```text
+claude mcp add --transport http arca https://arca.example.com/mcp
+```
+
+In Claude Desktop, add a custom connector with the same URL. Then, in the client, connect (Claude Code: `/mcp`, pick
+`arca`, Authenticate). The browser opens Arca's consent page, which shows:
+
+- the app's name, as the app registered it, and a warning when another app registered the same name;
+- the host its answer goes to (`127.0.0.1` for an app on the computer you are using);
+- the scope it asks for, in words: `viewer` looks, `doctor` also creates, changes, starts and stops (what erases
+  still waits for your passkey), `operator` also lists tokens and settles plans.
+
+**Approve with passkey** signs you in and approves in one tap: the passkey signs a statement (action `mcp_authorize`, the
+app's client id, a digest of the whole request) that the kernel checks as it checks every approval, owner passkeys only,
+and spends once. **Don't allow** sends the app `access_denied`. A request that is wrong before you see it (no PKCE, a
+foreign `resource`, `admin`) is answered on the page itself while the app has never been approved, and sent back to the
+app only once you approved it before, so the page's address never becomes a link to a stranger's site.
+
+The app then holds an access token for one hour and a refresh token for thirty days. Each refresh token works once and is
+replaced at each refresh; one used a second time ends the grant, since someone holds a copy. A refresh may narrow the scope
+of the tokens it gets and never widen it; a refresh that names no scope gets back what you approved. A token that is
+expired or revoked is answered `401` with `error="invalid_token"`. An app asks for `viewer` first; when it calls a verb above its scope, the door answers `403` with
+`WWW-Authenticate: Bearer error="insufficient_scope", scope="<scope the verb needs>"`, and the app asks you again for that
+scope. `admin` is never granted to an app: the admin token stays a stored one.
+
+The approval page lists the connected apps under **Connected apps**, each with the most it may do across its approvals
+and when it was last used, and **Disconnect**. On the node's own terminal:
+
+```text
+arca oauth list [--config <file>]
+arca oauth revoke <client id> [--config <file>]
+```
+
+Both act at once: the app's tokens stop working, and it must be approved again. Stored tokens (`arca token mint`) work
+exactly as before, beside the apps.
+
+What the node serves, all on `approvalOrigin`:
+
+| Path | What |
+| --- | --- |
+| `GET /.well-known/oauth-protected-resource/mcp` (and without `/mcp`) | RFC 9728 metadata: the resource `<origin>/mcp`, this issuer, the scopes |
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 metadata: `code` with PKCE `S256` only, public clients (`none`), the RFC 9207 `iss` |
+| `POST /oauth/register` | RFC 7591 registration: redirect URIs are exact, and `https`, or `http` on `127.0.0.1`, `[::1]` or `localhost` |
+| `GET /oauth/authorize` | the consent page; `resource` (RFC 8707) must be `<origin>/mcp` |
+| `POST /oauth/token` | `authorization_code` with the PKCE verifier, `refresh_token` with rotation |
+| `POST /oauth/revoke` | RFC 7009: an access token alone, or a refresh token and its grant; `503` when the revocation could not be saved (the grant has ended until the next start; try again) |
+
+Files in the state directory: `mcp-oauth.json` (the apps and their grants, with only the SHA-256 of each token, mode 0600)
+and `mcp-oauth-journal.jsonl` (each registration, grant, denial and revocation, and each refresh token or code used twice;
+never a token). Consent requests (ten minutes) and codes (one minute, one use) are kept in memory only.
+
+The node must be reached at `approvalOrigin` by the app too: the reverse proxy or the tailnet listener that serves the
+page serves these routes and `/mcp` under the same name. A page at `http://localhost:<port>` serves an app on the same
+machine.
 
 ### Protocol versions
 
@@ -2117,6 +2204,33 @@ the failure reason. The failure and provenance fields are additions: `cpu.coresK
 `load.reason` and `memory.reason`. Every field the earlier schema carried keeps its name and meaning, and a local node's
 figures do not change.
 
+## OS update state: `os_update`
+
+`os_update` is a viewer read of the node's Arca OS update state. The sampler reads incus-osd's update document,
+`GET /os/1.0/system/update`, with the Secure Boot and TPM reading every 5 minutes, and the verb answers from that reading:
+it sends no request of its own. When the document's health names no current version, the same read also asks `GET /os/1.0`
+for `environment.os_version`. `node_metrics` stays the host metrics domain; the update state changes on a slower cadence
+and has its own contract.
+
+| Field | From |
+|---|---|
+| `known` | `false` when the update document could not be read: a plain Incus that answers 404, a failed read, or before the first read. Never an error. |
+| `asOf` | When the read ran, epoch milliseconds. |
+| `version` | `state.health.current_version`, else `environment.os_version` of `/os/1.0`. |
+| `channel`, `checkFrequency` | `config.channel` and `config.check_frequency`, verbatim (`6h`, `never`). |
+| `automatic` | `!config.auto_updates_off` (incus-osd omits the field when it is false). |
+| `lastCheckAt` | `state.last_check`, when it is a usable RFC 3339 time. |
+| `lastSuccessAt` | The check time of the newest check this kernel saw complete (the same memory the update alert uses). |
+| `lastUpdatedVersion`, `lastUpdatedAt` | The version a completed `… has been updated to version V` status named, kept only when it is a plain version token, and the check time read with it. |
+| `needsReboot`, `pendingVersion`, `previousVersion`, `goodVersion`, `lastResult`, `lastReason` | `state.needs_reboot` and `state.health.*`, verbatim. |
+| `lastErrorKind` | `state.last_error_kind` as the OS classified it: `network`, `parse`, `signature`, `trust` or `other`; `null` when absent or empty. The kernel never classifies an error. |
+| `trust` | `embeddedCaFingerprint`, `presentedCaFingerprint` (SHA-256, hex pairs joined by colons), `failures` and `escalated` from `state.embedded_ca_fingerprint`, `state.presented_ca_fingerprint`, `state.trust_failures` and `state.trust_escalated`; `null` when the OS reports none of them. |
+
+Every field is present, and `null` when unknown. The raw `state.last_error` text is never read, and the status text is not
+kept beyond the version token. `lastResult` and `lastReason` are the OS's own words, so the verb is marked `untrusted`.
+The canvas's Fleet view reads this verb on every configured host. The update server's newest version for a channel is not
+in the update document, so the view compares a node with the newest version reported on the fleet's own nodes.
+
 ## Starting, stopping and restarting instances
 
 `instance_start`, `instance_stop` and `instance_restart` take `{project, instance}` and change the power state of one
@@ -2170,6 +2284,72 @@ with `"secrets":null`: it names the secrets and never holds a value or a reason 
 The `begin` line is durable before anything is sent to Incus:
 when it cannot be written (the file is a link, or is not mode 0600) the call is refused with `InstanceJournalUnavailable`
 and nothing changes. A file past 8 MiB is set aside as `instance-actions.jsonl.1`, replacing the one set aside before.
+
+## Before moving an instance: `instance_move_preflight`
+
+`instance_move_preflight` (viewer) answers, before anything is moved, whether a target node can take each instance and
+what to fix first. It changes nothing: it sends only GETs, to this node's Incus and to the target's, and walks the
+instance's storage folder on this host to measure it. Nothing is stopped, started, copied or created, no proposal is
+recorded, and no journal or state file is written. Every finding is a check in the instance's row; the verb itself
+refuses only arguments it cannot read.
+
+It takes `instances`, a list of 1 to 50 `{project, name}` references on this node (one instance is a list of one), the
+`target`, and an optional `live` (default `false`). The target is one of this kernel's linked hosts
+(`approval.linkedHosts`), named as the config names it, whose `incusSocket` is that host's Incus socket here. A target
+with no such linked host, with no `incusSocket`, or whose Incus does not answer is not a refusal: `target.reachable` is
+`false`, `target.reason` says why, and every row is no-go with that reason.
+
+The answer has one row per instance, in the order asked: its `project`, `name` and `target`, `go`, a `reason` when it is
+no-go, and eight `checks`, always all eight and always in this order. Each check is `ok` or not, with a `detail` an
+operator can act on, `findings` (each with its `subject`, `ok`, `detail` and a `proposal`), and `risks` that do not
+block the move by themselves. `go` is true only when every check is ok.
+
+| Check | What it reads | Not ok when |
+|-------|---------------|-------------|
+| `size` | Everything that lands on the target pool, measured on this host by walking it: the instance's own folder (`<incus dir>/storage-pools/<pool>/containers/<project>_<name>`, or `virtual-machines/`), its snapshots (each counted in full, so the need is an upper bound), each custom volume it mounts that is not on the target yet and lands on the same pool (Incus keeps it at `custom/<project>_<name>`, `default_<name>` when the instance's project does not set `features.storage.volumes`), and each host folder it mounts. A file counts at its size or its blocks, whichever is larger, and a file with several links once. On btrfs and dir the folders are always there; on zfs, lvm and ceph a container's volume is walked only while Incus has it mounted, and a virtual machine's disk there is a block volume that is not walked. Incus's own usage figure is never used: it leaves out data shared with a snapshot or an image clone. It adds 10% headroom and compares that with the target pool's free space less every earlier instance of the same call that fits there. `measure` holds every number, part by part. | The need is larger than what is left, or the free space cannot be read. The row also gives the need without the snapshots (`neededWithoutSnapshotsBytes`, `fitsWithoutSnapshots`) and says "fits without snapshots" when only that one fits. When anything cannot be walked (an unmounted or block volume, an unknown driver, a folder the kernel's user cannot read) the size is not measured: not ok, with `measure.notMeasured` and the detail giving the reason. |
+| `storageDriver` | The driver of the instance's pool here and of the target pool (the pool of the same name, else the one the target's default profile names). | The target has no such pool. A move across drivers is ok, with `crossesDriver: true` and the risk said: Incus copies the files one by one instead of sending a btrfs or zfs stream. |
+| `cpu` | Both hosts' CPU features (`/1.0/resources`), their x86-64 levels, and whether the target runs the instance's architecture. | The target does not run the architecture; or, with `live: true`, it lacks any CPU feature of this host (`missingFeatures` names them). On a cold move a missing feature is a risk: programs built for this host's CPU may use it. |
+| `devices` | Each GPU, GPU node (`/dev/dri/...`), other `unix-char` or `unix-block` device, USB and PCI device, custom volume and host folder disk. | The target lacks it. A host device Incus does not list cannot be confirmed and is not ok unless the device says `required=false`. A host folder disk is always not ok: its data stays here, and the proposal names a custom volume on the target to copy it into. |
+| `networks` | Each network card's network or parent, and its fixed address. | The target has no such network (the proposal names the same subnet as here), the fixed address is outside the target network's subnet, or another card holds it there. |
+| `projectsProfilesAcls` | The project and its `features.*`, each profile, and each ACL the cards or their networks name. | One is missing on the target or differs from here; each is named. |
+| `proxyListen` | Each proxy device's listen address. | It listens on an address of this host that the target does not hold; the proposal names the target's own addresses. Every-address and loopback listens move as they are. |
+| `macvlanParents` | Each macvlan card's parent interface, matched against the target's own interface names. | The target has no interface of that name. On IncusOS the bridge carries the network card's name and a `_p...` port is not a parent, so the proposal lists the target's own names. |
+
+To measure, the kernel's user needs read access to the Incus storage folders (`/var/lib/incus/storage-pools` and
+below) and to every host folder an instance mounts. On a standard host those are `root:root` with mode 0711, so a kernel
+that runs as an ordinary user cannot list them: its `size` check says "not measured" with the permission error and the
+path, and every other check still answers. Give the kernel's user read access there (for example through an ACL), or
+read the size from a kernel that can.
+
+A worked example. `node-a` holds the container `web` in the project `shop`, 4.0 GiB on a btrfs pool, with a fixed address
+on `arcabr0` and a proxy on `node-a`'s own address. Its config links `node-b`:
+
+```json
+"approval": { "linkedHosts": [ { "name": "node-b", "socket": "/run/arca-node-b/arca.sock",
+  "tokenFile": "/etc/arca/node-b-relay.secret", "incusSocket": "/run/arca-node-b/incus.sock" } ] }
+```
+
+```
+arca call instance_move_preflight '{"instances":[{"project":"shop","name":"web"}],"target":"node-b"}'
+```
+
+```json
+{ "target": { "name": "node-b", "reachable": true, "reason": null }, "live": false,
+  "rows": [ { "project": "shop", "name": "web", "target": "node-b", "go": false, "reason": "not ok: proxyListen",
+    "checks": [
+      { "check": "size", "ok": true, "detail": "measured 4.0 GiB (4294967296 bytes) by walking the instance 4.0 GiB at /var/lib/incus/storage-pools/default/containers/shop_web; with 10% headroom it needs 4.4 GiB. node-b's pool default has 120.0 GiB free, minus 0 B pending for earlier moves to it = 120.0 GiB available: it fits", "findings": [], "risks": [],
+        "measure": { "method": "walked", "measuredBytes": 4294967296, "headroomBytes": 429496729, "neededBytes": 4724464025, "targetFreeBytes": 128849018880, "pendingBytes": 0, "availableBytes": 128849018880, "...": "..." } },
+      { "check": "proxyListen", "ok": false, "detail": "not ok: https", "risks": [],
+        "findings": [ { "subject": "https", "ok": false,
+          "detail": "the proxy https listens on 203.0.113.10 port 443, an address of this host (enp6s0) that node-b does not have; on node-b it would not listen",
+          "proposal": "re-point https's listen to one of node-b's own addresses: 203.0.113.20 (br-lan), or to 0.0.0.0 for every address" } ] },
+      "... the other six checks, each ok ..."
+    ] } ] }
+```
+
+The operator re-points the proxy, then asks again; `go` turns true. Several instances in one call are sized one after
+another against the same pool: an earlier one that fits counts as pending for the later ones, and its name is in their
+`detail` and in `measure.pendingFor`.
 
 ## Snapshot storage and snapshots
 
@@ -4448,9 +4628,10 @@ install --replace` from a newer release. `service_status` answers both under `up
 key on any other row. Both are read from this node's own records and files: no registry is asked and nothing is
 written. Two digests carry no order, so `differs` never says which version is the newer one. A service made from a
 system image by an alias has no version of this kind and carries no `update` (`baseImage`, above, is what it has),
-and neither does an adopted instance. For a container made from an image by digest, `service_update` moves it to another digest (see "Updating a service
-to a new image digest"); for a virtual machine the only way is `service_remove` and `service_create`. This only tells you that
-there is one.
+and neither does an adopted instance. For a container made from an image by digest or a local image pinned by
+fingerprint, `service_update` moves it to another digest, or fingerprint (see "Updating a service to a new image
+digest"); for a virtual machine the only way is `service_remove` and `service_create`. This only tells you that there
+is one.
 
 A virtual-machine template says where its version is with one key:
 
