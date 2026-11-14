@@ -2,7 +2,8 @@
 //! request it receives.
 //!
 //! GET routes: `/1.0`, `/1.0/projects?recursion=1`, `/1.0/instances?all-projects=true&recursion=1`,
-//! `/1.0/instances?all-projects=true&recursion=2`, `/1.0/storage-pools?recursion=1`, `/1.0/storage-pools/<pool>/resources`,
+//! `/1.0/instances?all-projects=true&recursion=2`, `/1.0/storage-pools?recursion=1`, `/1.0/storage-pools/<pool>` (its driver set by
+//! [`FakeIncus::set_pool_driver`]), `/1.0/storage-pools/<pool>/resources`,
 //! `/1.0/networks?recursion=1` and `/1.0/networks/<name>/state` (the host's interfaces, set by
 //! [`FakeIncus::set_host_interfaces`]), every object path, `/1.0/operations?all-projects=true&recursion=1`, and
 //! `/1.0/operations/<id>` with its `/wait`. Any other GET is 404.
@@ -214,6 +215,8 @@ struct Shared {
     lxc_split: Mutex<LxcSplit>,
     host_interfaces: Mutex<Vec<HostInterface>>,
     host_netmasks: Mutex<BTreeMap<IpAddr, u8>>,
+    /// What `/os/1.0/system/network` answers, as incus-osd does on IncusOS; `None` answers 404, as any other host does.
+    os_network: Mutex<Option<Value>>,
     operations_unreadable: AtomicBool,
     /// Reads the fake answers badly: each a path prefix, how many reads are left, and what happens to them.
     read_faults: Mutex<Vec<(String, u32, ReadFault)>>,
@@ -234,6 +237,8 @@ struct Shared {
     counter: AtomicU64,
     /// The `/1.0/resources` document the fake serves, when a test sets one.
     resources: Mutex<Option<Value>>,
+    /// The driver each pool's own document names, by pool, set by [`FakeIncus::set_pool_driver`].
+    pool_drivers: Mutex<BTreeMap<String, String>>,
 }
 
 /// The served state: the server document, the pools, every object and every operation.
@@ -255,6 +260,8 @@ struct Store {
     /// The network cards a running instance reports in its live state, by project and name, set by
     /// [`FakeIncus::set_live_network`]: in place of the cards the fake makes from its devices and leases.
     live: BTreeMap<(String, String), Value>,
+    /// The root disk usage, in bytes, an instance reports in its state, by project and name.
+    disk_usage: BTreeMap<(String, String), u64>,
 }
 
 /// One DHCP lease: the network, the MAC that holds it and its address, and whether a device's `ipv4.address` pinned it.
@@ -322,7 +329,10 @@ enum Route {
     ListPools,
     HostInterfaces,
     HostInterfaceState(String),
+    /// incus-osd's `/os/1.0/system/network`.
+    OsNetwork,
     PoolResources(String),
+    PoolObject(String),
     NetworkLeases(String),
     InstanceState(Address),
     InstanceRebuild(Address),
@@ -406,6 +416,7 @@ impl Shared {
             hung: BTreeMap::new(),
             usage: BTreeMap::new(),
             live: BTreeMap::new(),
+            disk_usage: BTreeMap::new(),
         };
         for index in 0..store.objects.len() {
             store.expand(index, false);
@@ -421,6 +432,7 @@ impl Shared {
             fail_create_start: AtomicBool::new(false),
             lxc_split: Mutex::new(LxcSplit::default()),
             host_interfaces: Mutex::new(Vec::new()),
+            os_network: Mutex::new(None),
             host_netmasks: Mutex::new(BTreeMap::new()),
             operations_unreadable: AtomicBool::new(false),
             read_faults: Mutex::new(Vec::new()),
@@ -433,6 +445,7 @@ impl Shared {
             restores: Mutex::new(BTreeMap::new()),
             counter: AtomicU64::new(1),
             resources: Mutex::new(None),
+            pool_drivers: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -540,10 +553,39 @@ impl FakeIncus {
         *lock(&self.shared.resources) = Some(document);
     }
 
+    /// Names the driver of the pool `pool` in the pool's own document, `GET /1.0/storage-pools/<pool>`. A pool the state
+    /// holds answers `dir` until a test names another; a pool it does not hold answers 404. It records no write.
+    pub fn set_pool_driver(&self, pool: &str, driver: &str) {
+        lock(&self.shared.pool_drivers).insert(pool.to_string(), driver.to_string());
+    }
+
+    /// Puts a network ACL in `project`, as a create by hand would. It records no write.
+    pub fn add_acl(&self, project: &str, body: Value) {
+        let mut store = lock(&self.shared.store);
+        let name = text_of(&body, "name");
+        store.objects.retain(|object| {
+            !(object.kind == "acl" && object.project == project && object.name == name)
+        });
+        store.objects.push(Stored {
+            kind: "acl".to_string(),
+            project: project.to_string(),
+            name,
+            parent: String::new(),
+            body,
+        });
+    }
+
     /// Sets the host's own interfaces: each name with the addresses it holds. The fake answers the listing of
     /// `/1.0/networks?recursion=1` and each `/1.0/networks/<name>/state` from them, and nothing else reads them.
     pub fn set_host_interfaces(&self, interfaces: Vec<(String, Vec<IpAddr>)>) {
         *lock(&self.shared.host_interfaces) = interfaces;
+    }
+
+    /// Makes the fake an IncusOS host: `/os/1.0/system/network` answers `body` (its `config` and `state`), as incus-osd
+    /// does, and the listing of `/1.0/networks?recursion=1` shows the interfaces of [`Self::set_host_interfaces`] as
+    /// managed bridges, the only networks IncusOS lists there. Without it that path answers 404.
+    pub fn set_os_network(&self, body: Value) {
+        *lock(&self.shared.os_network) = Some(body);
     }
 
     /// Gives a host address its prefix length: the fake then answers it as `netmask` in the interface's state, as Incus
@@ -760,6 +802,19 @@ impl FakeIncus {
             (project.to_string(), name.to_string()),
             (cpu_ns, memory_bytes),
         );
+    }
+
+    /// Sets the root disk usage, in bytes, the instance `name` in `project` reports in its `state` as `disk.root.usage`, as
+    /// Incus reads it from the storage driver. Panics when no such instance is held. It records no write.
+    pub fn set_root_disk_usage(&self, project: &str, name: &str, bytes: u64) {
+        let mut store = lock(&self.shared.store);
+        assert!(
+            store.instance_held(project, name),
+            "no instance {project}/{name} to set the disk usage of"
+        );
+        store
+            .disk_usage
+            .insert((project.to_string(), name.to_string()), bytes);
     }
 
     /// Sets the network cards the running instance `name` in `project` reports in its live state, as a guest's agent does:
@@ -1289,6 +1344,9 @@ fn hold_wait(shared: &Shared, id: &str, target: &str) {
 /// The route for a target, or `None` when no route serves it.
 fn parse(target: &str) -> Option<Route> {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    if path == "/os/1.0/system/network" && query.is_empty() {
+        return Some(Route::OsNetwork);
+    }
     let rest = path.strip_prefix("/1.0")?;
     let segments: Vec<&str> = if rest.is_empty() {
         Vec::new()
@@ -1356,6 +1414,7 @@ fn parse(target: &str) -> Option<Route> {
         }
         ["images", fingerprint] => Route::Object(address("image", "", fingerprint)),
         ["storage-pools"] if query == "recursion=1" => Route::ListPools,
+        ["storage-pools", pool] if query.is_empty() => Route::PoolObject((*pool).to_string()),
         ["storage-pools", pool, "resources"] if query.is_empty() => {
             Route::PoolResources((*pool).to_string())
         }
@@ -1460,13 +1519,19 @@ fn dispatch(shared: &Shared, request: &Request, route: Route) -> (u16, String, V
         }
         ("GET", Route::HostInterfaces) => {
             let interfaces = lock(&shared.host_interfaces);
+            // IncusOS lists only the networks Incus manages; any other host lists its own interfaces unmanaged.
+            let managed = lock(&shared.os_network).is_some();
             sync(Value::Array(
                 interfaces
                     .iter()
-                    .map(|(name, _)| json!({ "name": name, "managed": false, "type": "broadcast" }))
+                    .map(|(name, _)| json!({ "name": name, "managed": managed, "type": if managed { "bridge" } else { "broadcast" } }))
                     .collect(),
             ))
         }
+        ("GET", Route::OsNetwork) => match lock(&shared.os_network).clone() {
+            Some(body) => sync(body),
+            None => (404, String::new(), error_envelope(404, "not found")),
+        },
         ("GET", Route::HostInterfaceState(name)) => {
             let interfaces = lock(&shared.host_interfaces);
             match interfaces.iter().find(|(listed, _)| *listed == name) {
@@ -1502,6 +1567,17 @@ fn dispatch(shared: &Shared, request: &Request, route: Route) -> (u16, String, V
             match store.pools.iter().find(|(name, _)| *name == pool) {
                 Some((_, resources)) => sync(resources.clone()),
                 None => (404, String::new(), error_envelope(404, "not found")),
+            }
+        }
+        ("GET", Route::PoolObject(pool)) => {
+            if store.pools.iter().any(|(name, _)| *name == pool) {
+                let driver = lock(&shared.pool_drivers)
+                    .get(&pool)
+                    .cloned()
+                    .unwrap_or_else(|| "dir".to_string());
+                sync(json!({ "name": pool, "driver": driver, "status": "Created", "config": {} }))
+            } else {
+                (404, String::new(), error_envelope(404, "not found"))
             }
         }
         ("GET", Route::ListOperations) => {
@@ -3311,13 +3387,20 @@ fn instance_state(store: &Store, address: &Address) -> Answer {
         .copied()
         .filter(|_| running)
         .unwrap_or((0, 0));
-    sync(json!({
+    let mut state = json!({
         "status": status,
         "status_code": if running { 103 } else { 102 },
         "network": network,
         "cpu": { "usage": cpu_ns },
         "memory": { "usage": memory },
-    }))
+    });
+    if let Some(bytes) = store
+        .disk_usage
+        .get(&(object.project.clone(), object.name.clone()))
+    {
+        state["disk"] = json!({ "root": { "usage": bytes } });
+    }
+    sync(state)
 }
 
 /// Rebuilds a stopped instance's root from an image, as an operation, and records which image the request named: the

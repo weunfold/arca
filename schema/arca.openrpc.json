@@ -1760,7 +1760,9 @@
                           "deploy_remove",
                           "function_create",
                           "function_remove",
-                          "host_network_restore"
+                          "host_network_restore",
+                          "route_add",
+                          "route_remove"
                         ],
                         "type": "string"
                       },
@@ -1887,7 +1889,9 @@
               "deploy_remove",
               "function_create",
               "function_remove",
-              "host_network_restore"
+              "host_network_restore",
+              "route_add",
+              "route_remove"
             ],
             "type": "string"
           }
@@ -2057,7 +2061,7 @@
               },
               {
                 "additionalProperties": false,
-                "description": "The args of service_update: Move a running container service made from an image by digest to another digest of that image in one call (or, with follow, say whether the node moves an Automagik server by itself): it is stopped, its root rebuilt from the new digest (data volume, config, secrets and firewall rules are kept), started, and checked within the timeout (120 seconds unless timeoutSeconds says otherwise). On any failure the old version is put back. A service whose template declares a data volume it lacks would lose its data: it is refused before any change, unless eraseData, which needs the owner's approval through action_propose. Example: {\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"name\":\"nats\"}",
+                "description": "The args of service_update: Move a running container service made from an image by digest, or a local image pinned by fingerprint, to another digest or fingerprint in one call (or, with follow, say whether the node moves an Automagik server by itself): it is stopped, its root rebuilt from the new image (data volume, config, secrets and firewall rules are kept), started, and checked within timeoutSeconds (120 by default). On any failure the old version is put back. A local image must already be in the service project's image store. A service whose template declares a data volume it lacks would lose its data: it is refused before any change, unless eraseData, which needs the owner's approval through action_propose. Example: {\"digest\":\"sha256:0000000000000000000000000000000000000000000000000000000000000000\",\"name\":\"nats\"}",
                 "examples": [
                   {
                     "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -2070,7 +2074,7 @@
                     "type": "boolean"
                   },
                   "digest": {
-                    "description": "The image digest to move to: sha256: and 64 lower-case hex digits. The service keeps its image's repository. Give it, or follow, not both.",
+                    "description": "The image to move to: sha256: and 64 lower-case hex digits. For an OCI image, the digest, and the service keeps its image's repository; for a service made from a local image pinned by fingerprint, the new image's fingerprint. Give it, or follow, not both.",
                     "pattern": "^sha256:[0-9a-f]{64}$",
                     "type": "string"
                   },
@@ -3057,6 +3061,80 @@
                 "required": [],
                 "title": "host_network_restore",
                 "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "The args of route_add: Serve https://<hostname> from this node's edge (the arca-edge service) to an instance of this node, in any project, on one tcp port, with a certificate by the Cloudflare DNS challenge. reach private (default) answers only the local networks and the tailnet, others get 403; public has no filter. The instance's address is read from Incus now and the edge's firewall opens it; an Arca service needs a link from the edge (service_connect). A hostname that has a route is re-pointed. The route is kept in the edge's desired state, its config is written and Caddy reloaded; a refused reload keeps the old config and the answer says so. From an approved proposal or a doctor token. Example: {\"hostname\":\"app.example.com\",\"instance\":\"web\",\"port\":8080}",
+                "examples": [
+                  {
+                    "hostname": "app.example.com",
+                    "instance": "web",
+                    "port": 8080
+                  }
+                ],
+                "properties": {
+                  "hostname": {
+                    "description": "A DNS name such as app.example.com: lowercase letters, digits and -, at least two labels, no wildcard.",
+                    "maxLength": 253,
+                    "minLength": 3,
+                    "type": "string"
+                  },
+                  "instance": {
+                    "description": "The Incus instance that serves the route, on this node.",
+                    "maxLength": 63,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "port": {
+                    "description": "The instance's tcp port the edge connects to.",
+                    "maximum": 65535,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "project": {
+                    "description": "The instance's Incus project. Default: the node's service project.",
+                    "maxLength": 63,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "reach": {
+                    "description": "private (default): only the local networks and the tailnet. public: no address filter.",
+                    "enum": [
+                      "private",
+                      "public"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "hostname",
+                  "instance",
+                  "port"
+                ],
+                "title": "route_add",
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "The args of route_remove: Stop serving a hostname from this node's edge: its site leaves the edge's config, Caddy is reloaded and the edge's firewall no longer opens its target for it. The instance itself is not touched. A hostname with no route still has the config written again and reloaded, so a remove whose reload failed is retried by removing again. Runs from an approved proposal or a doctor token. Example: {\"hostname\":\"app.example.com\"}",
+                "examples": [
+                  {
+                    "hostname": "app.example.com"
+                  }
+                ],
+                "properties": {
+                  "hostname": {
+                    "description": "A DNS name such as app.example.com: lowercase letters, digits and -, at least two labels, no wildcard.",
+                    "maxLength": 253,
+                    "minLength": 3,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "hostname"
+                ],
+                "title": "route_remove",
+                "type": "object"
               }
             ],
             "description": "The action's own arguments: those of the anyOf branch whose title is the action.",
@@ -3094,7 +3172,9 @@
                 "deploy_remove",
                 "function_create",
                 "function_remove",
-                "host_network_restore"
+                "host_network_restore",
+                "route_add",
+                "route_remove"
               ],
               "type": "string"
             },
@@ -3471,7 +3551,9 @@
                 "deploy_remove",
                 "function_create",
                 "function_remove",
-                "host_network_restore"
+                "host_network_restore",
+                "route_add",
+                "route_remove"
               ],
               "type": "string"
             },
@@ -5763,7 +5845,7 @@
           "name": "digest",
           "required": false,
           "schema": {
-            "description": "The image digest to move to: sha256: and 64 lower-case hex digits. The service keeps its image's repository. Give it, or follow, not both.",
+            "description": "The image to move to: sha256: and 64 lower-case hex digits. For an OCI image, the digest, and the service keeps its image's repository; for a service made from a local image pinned by fingerprint, the new image's fingerprint. Give it, or follow, not both.",
             "pattern": "^sha256:[0-9a-f]{64}$",
             "type": "string"
           }
@@ -5859,7 +5941,7 @@
           "type": "object"
         }
       },
-      "summary": "Move a running container service made from an image by digest to another digest of that image in one call (or, with follow, say whether the node moves an Automagik server by itself): it is stopped, its root rebuilt from the new digest (data volume, config, secrets and firewall rules are kept), started, and checked within the timeout (120 seconds unless timeoutSeconds says otherwise). On any failure the old version is put back. A service whose template declares a data volume it lacks would lose its data: it is refused before any change, unless eraseData, which needs the owner's approval through action_propose.",
+      "summary": "Move a running container service made from an image by digest, or a local image pinned by fingerprint, to another digest or fingerprint in one call (or, with follow, say whether the node moves an Automagik server by itself): it is stopped, its root rebuilt from the new image (data volume, config, secrets and firewall rules are kept), started, and checked within timeoutSeconds (120 by default). On any failure the old version is put back. A local image must already be in the service project's image store. A service whose template declares a data volume it lacks would lose its data: it is refused before any change, unless eraseData, which needs the owner's approval through action_propose.",
       "x-arca-additional-properties": true,
       "x-arca-class": "L",
       "x-arca-read-only-hint": false,
@@ -10834,6 +10916,697 @@
       "x-arca-read-only-hint": false,
       "x-arca-scope": "doctor",
       "x-arca-writes": true
+    },
+    {
+      "name": "instance_move_preflight",
+      "params": [
+        {
+          "name": "instances",
+          "required": true,
+          "schema": {
+            "description": "The instances to check, in the order the rows answer them: 1 to 50 references. One instance is a list of one. An earlier instance whose size fits counts as already destined for the target when a later one is sized.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "description": "The Incus instance name.",
+                  "maxLength": 63,
+                  "minLength": 1,
+                  "pattern": "^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$",
+                  "type": "string"
+                },
+                "project": {
+                  "description": "The Incus project the instance is in, on this node.",
+                  "maxLength": 63,
+                  "minLength": 1,
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "project",
+                "name"
+              ],
+              "type": "object"
+            },
+            "maxItems": 50,
+            "type": "array"
+          }
+        },
+        {
+          "name": "target",
+          "required": true,
+          "schema": {
+            "description": "The target node: the name of one of this kernel's linked hosts (approval.linkedHosts). Its facts are read through that host's incusSocket.",
+            "maxLength": 253,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$",
+            "type": "string"
+          }
+        },
+        {
+          "name": "live",
+          "required": false,
+          "schema": {
+            "description": "Check for a live (stateful) move: the target's CPU must then have every CPU feature of this host. Absent or false, a cold move, where a missing feature is a risk and not a blocker.",
+            "type": "boolean"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "live": {
+              "type": "boolean"
+            },
+            "rows": {
+              "items": {
+                "properties": {
+                  "checks": {
+                    "items": {
+                      "properties": {
+                        "check": {
+                          "enum": [
+                            "size",
+                            "storageDriver",
+                            "cpu",
+                            "devices",
+                            "networks",
+                            "projectsProfilesAcls",
+                            "proxyListen",
+                            "macvlanParents"
+                          ],
+                          "type": "string"
+                        },
+                        "crossesDriver": {
+                          "type": [
+                            "boolean",
+                            "null"
+                          ]
+                        },
+                        "detail": {
+                          "type": "string"
+                        },
+                        "findings": {
+                          "items": {
+                            "properties": {
+                              "detail": {
+                                "type": "string"
+                              },
+                              "ok": {
+                                "type": "boolean"
+                              },
+                              "proposal": {
+                                "type": [
+                                  "string",
+                                  "null"
+                                ]
+                              },
+                              "subject": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "subject",
+                              "ok",
+                              "detail",
+                              "proposal"
+                            ],
+                            "type": "object"
+                          },
+                          "type": "array"
+                        },
+                        "live": {
+                          "type": "boolean"
+                        },
+                        "measure": {
+                          "properties": {
+                            "availableBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "fitsWithoutSnapshots": {
+                              "type": [
+                                "boolean",
+                                "null"
+                              ]
+                            },
+                            "headroomBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "hostFolderBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "instanceBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "measuredBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "method": {
+                              "anyOf": [
+                                {
+                                  "enum": [
+                                    "walked"
+                                  ],
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "null"
+                                }
+                              ]
+                            },
+                            "neededBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "neededWithoutSnapshotsBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "notMeasured": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "path": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "pendingBytes": {
+                              "type": "integer"
+                            },
+                            "pendingFor": {
+                              "items": {
+                                "type": "string"
+                              },
+                              "type": "array"
+                            },
+                            "snapshotBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "sourcePool": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "targetFreeBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            },
+                            "targetPool": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            },
+                            "volumeBytes": {
+                              "type": [
+                                "integer",
+                                "null"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "method",
+                            "path",
+                            "instanceBytes",
+                            "snapshotBytes",
+                            "volumeBytes",
+                            "hostFolderBytes",
+                            "notMeasured",
+                            "measuredBytes",
+                            "headroomBytes",
+                            "neededBytes",
+                            "sourcePool",
+                            "targetPool",
+                            "targetFreeBytes",
+                            "pendingBytes",
+                            "pendingFor",
+                            "availableBytes"
+                          ],
+                          "type": "object"
+                        },
+                        "missingFeatures": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "ok": {
+                          "type": "boolean"
+                        },
+                        "risks": {
+                          "items": {
+                            "type": "string"
+                          },
+                          "type": "array"
+                        },
+                        "sourceBaseline": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "sourceDriver": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "targetBaseline": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "targetDriver": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "check",
+                        "ok",
+                        "detail",
+                        "findings",
+                        "risks"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "go": {
+                    "type": "boolean"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "target": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "project",
+                  "name",
+                  "target",
+                  "go",
+                  "reason",
+                  "checks"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "target": {
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "reachable": {
+                  "type": "boolean"
+                },
+                "reason": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "reachable",
+                "reason"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "target",
+            "live",
+            "rows"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "Before any move: whether a linked host can take each instance, one go/no-go row per instance in input order. Each row checks the instance's measured size against the target pool's free space less the earlier instances of the call, the storage driver change, the CPU features (all of them for a live move), devices the target lacks, networks and fixed addresses, projects, profiles and ACLs, proxies listening on this host's own address, and macvlan parent names, each ok or the reason it is not with what to do. It only reads: nothing is stopped, copied, created or recorded.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": true,
+      "x-arca-scope": "viewer",
+      "x-arca-writes": false
+    },
+    {
+      "name": "route_add",
+      "params": [
+        {
+          "name": "hostname",
+          "required": true,
+          "schema": {
+            "description": "A DNS name such as app.example.com: lowercase letters, digits and -, at least two labels, no wildcard.",
+            "maxLength": 253,
+            "minLength": 3,
+            "type": "string"
+          }
+        },
+        {
+          "name": "instance",
+          "required": true,
+          "schema": {
+            "description": "The Incus instance that serves the route, on this node.",
+            "maxLength": 63,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        {
+          "name": "port",
+          "required": true,
+          "schema": {
+            "description": "The instance's tcp port the edge connects to.",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "project",
+          "required": false,
+          "schema": {
+            "description": "The instance's Incus project. Default: the node's service project.",
+            "maxLength": 63,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        {
+          "name": "reach",
+          "required": false,
+          "schema": {
+            "description": "private (default): only the local networks and the tailnet. public: no address filter.",
+            "enum": [
+              "private",
+              "public"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "address": {
+              "type": "string"
+            },
+            "applied": {
+              "type": "boolean"
+            },
+            "edge": {
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "address"
+              ],
+              "type": "object"
+            },
+            "hostname": {
+              "type": "string"
+            },
+            "instance": {
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            },
+            "port": {
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "project": {
+              "type": "string"
+            },
+            "reach": {
+              "enum": [
+                "private",
+                "public"
+              ],
+              "type": "string"
+            },
+            "reloaded": {
+              "type": "boolean"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "hostname",
+            "url",
+            "instance",
+            "project",
+            "address",
+            "port",
+            "reach",
+            "edge",
+            "applied",
+            "reloaded"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "Serve https://<hostname> from this node's edge (the arca-edge service) to an instance of this node, in any project, on one tcp port, with a certificate by the Cloudflare DNS challenge. reach private (default) answers only the local networks and the tailnet, others get 403; public has no filter. The instance's address is read from Incus now and the edge's firewall opens it; an Arca service needs a link from the edge (service_connect). A hostname that has a route is re-pointed. The route is kept in the edge's desired state, its config is written and Caddy reloaded; a refused reload keeps the old config and the answer says so. From an approved proposal or a doctor token.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": false,
+      "x-arca-scope": "doctor",
+      "x-arca-writes": true
+    },
+    {
+      "name": "route_remove",
+      "params": [
+        {
+          "name": "hostname",
+          "required": true,
+          "schema": {
+            "description": "A DNS name such as app.example.com: lowercase letters, digits and -, at least two labels, no wildcard.",
+            "maxLength": 253,
+            "minLength": 3,
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "address": {
+              "type": "string"
+            },
+            "applied": {
+              "type": "boolean"
+            },
+            "edge": {
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "address"
+              ],
+              "type": "object"
+            },
+            "hostname": {
+              "type": "string"
+            },
+            "instance": {
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            },
+            "port": {
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "project": {
+              "type": "string"
+            },
+            "reach": {
+              "enum": [
+                "private",
+                "public"
+              ],
+              "type": "string"
+            },
+            "reloaded": {
+              "type": "boolean"
+            },
+            "removed": {
+              "type": "boolean"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "hostname",
+            "url",
+            "removed",
+            "edge",
+            "applied",
+            "reloaded"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "Stop serving a hostname from this node's edge: its site leaves the edge's config, Caddy is reloaded and the edge's firewall no longer opens its target for it. The instance itself is not touched. A hostname with no route still has the config written again and reloaded, so a remove whose reload failed is retried by removing again. Runs from an approved proposal or a doctor token.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": false,
+      "x-arca-scope": "doctor",
+      "x-arca-writes": true
+    },
+    {
+      "name": "route_list",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "edge": {
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "ipv4": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "address",
+                "ipv4"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "routes": {
+              "items": {
+                "properties": {
+                  "address": {
+                    "type": "string"
+                  },
+                  "hostname": {
+                    "type": "string"
+                  },
+                  "instance": {
+                    "type": "string"
+                  },
+                  "port": {
+                    "maximum": 65535,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "reach": {
+                    "enum": [
+                      "private",
+                      "public"
+                    ],
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "hostname",
+                  "url",
+                  "instance",
+                  "project",
+                  "address",
+                  "port",
+                  "reach"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "edge",
+            "routes"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "This node's routes: each hostname with its instance, project, address, port and reach, and the edge that serves them with the address a person reaches it on. Empty, with no edge, on a node that has none.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": true,
+      "x-arca-scope": "viewer",
+      "x-arca-writes": false
     }
   ],
   "openrpc": "1.3.2",

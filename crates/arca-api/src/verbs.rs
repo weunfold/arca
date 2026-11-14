@@ -83,7 +83,7 @@ impl Verb {
     }
 }
 
-static VERBS: [Verb; 68] = [
+static VERBS: [Verb; 72] = [
     Verb {
         name: "arca_status",
         summary: "Node status: the API version, the node id, the mode, the uptime, whether Incus answers and the last applied sequence number.",
@@ -408,7 +408,7 @@ static VERBS: [Verb; 68] = [
     },
     Verb {
         name: "service_update",
-        summary: "Move a running container service made from an image by digest to another digest of that image in one call (or, with follow, say whether the node moves an Automagik server by itself): it is stopped, its root rebuilt from the new digest (data volume, config, secrets and firewall rules are kept), started, and checked within the timeout (120 seconds unless timeoutSeconds says otherwise). On any failure the old version is put back. A service whose template declares a data volume it lacks would lose its data: it is refused before any change, unless eraseData, which needs the owner's approval through action_propose.",
+        summary: "Move a running container service made from an image by digest, or a local image pinned by fingerprint, to another digest or fingerprint in one call (or, with follow, say whether the node moves an Automagik server by itself): it is stopped, its root rebuilt from the new image (data volume, config, secrets and firewall rules are kept), started, and checked within timeoutSeconds (120 by default). On any failure the old version is put back. A local image must already be in the service project's image store. A service whose template declares a data volume it lacks would lose its data: it is refused before any change, unless eraseData, which needs the owner's approval through action_propose.",
         class: VerbClass::L,
         min_scope: Scope::Doctor,
         writes: true,
@@ -1041,7 +1041,363 @@ static VERBS: [Verb; 68] = [
         params: host_network_restore_params,
         result: host_network_restore_result,
     },
+    Verb {
+        name: "instance_move_preflight",
+        summary: "Before any move: whether a linked host can take each instance, one go/no-go row per instance in input order. Each row checks the instance's measured size against the target pool's free space less the earlier instances of the call, the storage driver change, the CPU features (all of them for a live move), devices the target lacks, networks and fixed addresses, projects, profiles and ACLs, proxies listening on this host's own address, and macvlan parent names, each ok or the reason it is not with what to do. It only reads: nothing is stopped, copied, created or recorded.",
+        class: VerbClass::L,
+        min_scope: Scope::Viewer,
+        writes: false,
+        destructive: false,
+        untrusted: false,
+        output_key: None,
+        summary_text: summary_move_preflight,
+        cut: no_cut,
+        params: instance_move_preflight_params,
+        result: instance_move_preflight_result,
+    },
+    Verb {
+        name: "route_add",
+        summary: "Serve https://<hostname> from this node's edge (the arca-edge service) to an instance of this node, in any project, on one tcp port, with a certificate by the Cloudflare DNS challenge. reach private (default) answers only the local networks and the tailnet, others get 403; public has no filter. The instance's address is read from Incus now and the edge's firewall opens it; an Arca service needs a link from the edge (service_connect). A hostname that has a route is re-pointed. The route is kept in the edge's desired state, its config is written and Caddy reloaded; a refused reload keeps the old config and the answer says so. From an approved proposal or a doctor token.",
+        class: VerbClass::L,
+        min_scope: Scope::Doctor,
+        writes: true,
+        destructive: false,
+        untrusted: false,
+        output_key: None,
+        summary_text: summary_route,
+        cut: no_cut,
+        params: route_add_params,
+        result: route_result,
+    },
+    Verb {
+        name: "route_remove",
+        summary: "Stop serving a hostname from this node's edge: its site leaves the edge's config, Caddy is reloaded and the edge's firewall no longer opens its target for it. The instance itself is not touched. A hostname with no route still has the config written again and reloaded, so a remove whose reload failed is retried by removing again. Runs from an approved proposal or a doctor token.",
+        class: VerbClass::L,
+        min_scope: Scope::Doctor,
+        writes: true,
+        destructive: false,
+        untrusted: false,
+        output_key: None,
+        summary_text: summary_route_remove,
+        cut: no_cut,
+        params: route_remove_params,
+        result: route_remove_result,
+    },
+    Verb {
+        name: "route_list",
+        summary: "This node's routes: each hostname with its instance, project, address, port and reach, and the edge that serves them with the address a person reaches it on. Empty, with no edge, on a node that has none.",
+        class: VerbClass::L,
+        min_scope: Scope::Viewer,
+        writes: false,
+        destructive: false,
+        untrusted: false,
+        output_key: None,
+        summary_text: summary_route_list,
+        cut: no_cut,
+        params: empty_params,
+        result: route_list_result,
+    },
 ];
+
+fn hostname_schema() -> Value {
+    json!({
+        "description": "A DNS name such as app.example.com: lowercase letters, digits and -, at least two labels, no wildcard.",
+        "maxLength": 253,
+        "minLength": 3,
+        "type": "string"
+    })
+}
+fn route_add_params() -> Value {
+    json!({
+        "additionalProperties": false,
+        "properties": {
+            "hostname": hostname_schema(),
+            "instance": {
+                "description": "The Incus instance that serves the route, on this node.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+            },
+            "project": {
+                "description": "The instance's Incus project. Default: the node's service project.",
+                "maxLength": 63,
+                "minLength": 1,
+                "type": "string"
+            },
+            "port": {
+                "description": "The instance's tcp port the edge connects to.",
+                "maximum": 65535,
+                "minimum": 1,
+                "type": "integer"
+            },
+            "reach": {
+                "description": "private (default): only the local networks and the tailnet. public: no address filter.",
+                "enum": ["private", "public"],
+                "type": "string"
+            }
+        },
+        "required": ["hostname", "instance", "port"],
+        "type": "object"
+    })
+}
+fn route_remove_params() -> Value {
+    json!({
+        "additionalProperties": false,
+        "properties": { "hostname": hostname_schema() },
+        "required": ["hostname"],
+        "type": "object"
+    })
+}
+fn route_view_schema() -> Value {
+    json!({
+        "properties": {
+            "hostname": { "type": "string" },
+            "url": { "type": "string" },
+            "instance": { "type": "string" },
+            "project": { "type": "string" },
+            "address": { "type": "string" },
+            "port": { "maximum": 65535, "minimum": 1, "type": "integer" },
+            "reach": { "enum": ["private", "public"], "type": "string" }
+        },
+        "required": ["hostname", "url", "instance", "project", "address", "port", "reach"],
+        "type": "object"
+    })
+}
+fn route_result() -> Value {
+    let mut schema = route_view_schema();
+    let properties = schema["properties"].as_object_mut().expect("an object");
+    properties.insert(
+        "edge".into(),
+        json!({
+            "properties": { "name": { "type": "string" }, "address": { "type": "string" } },
+            "required": ["name", "address"],
+            "type": "object"
+        }),
+    );
+    properties.insert("applied".into(), json!({ "type": "boolean" }));
+    properties.insert("reloaded".into(), json!({ "type": "boolean" }));
+    properties.insert("note".into(), json!({ "type": "string" }));
+    schema["required"].as_array_mut().expect("a list").extend([
+        json!("edge"),
+        json!("applied"),
+        json!("reloaded"),
+    ]);
+    schema
+}
+/// What a remove answers: the route it removed, or only the hostname when there was none (`removed` false), and what
+/// writing the edge's config did.
+fn route_remove_result() -> Value {
+    let mut schema = route_result();
+    schema["properties"]
+        .as_object_mut()
+        .expect("an object")
+        .insert("removed".into(), json!({ "type": "boolean" }));
+    schema["required"] = json!(["hostname", "url", "removed", "edge", "applied", "reloaded"]);
+    schema
+}
+fn route_list_result() -> Value {
+    json!({
+        "properties": {
+            "edge": {
+                "properties": {
+                    "name": { "type": "string" },
+                    "address": { "type": "string" },
+                    "ipv4": { "type": "string" }
+                },
+                "required": ["name", "address", "ipv4"],
+                "type": ["object", "null"]
+            },
+            "routes": { "items": route_view_schema(), "type": "array" }
+        },
+        "required": ["edge", "routes"],
+        "type": "object"
+    })
+}
+fn summary_route(v: &Value) -> String {
+    let what = "serving";
+    let state = if v["reloaded"] == true {
+        "the edge took it"
+    } else if v["applied"] == true {
+        "written; the edge reads it when it starts"
+    } else {
+        "recorded, but the edge did not take it"
+    };
+    format!(
+        "{what} {} -> {}:{} ({}): {state}",
+        v["url"].as_str().unwrap_or("?"),
+        v["instance"].as_str().unwrap_or("?"),
+        v["port"],
+        v["reach"].as_str().unwrap_or("?")
+    )
+}
+fn summary_route_remove(v: &Value) -> String {
+    let url = v["url"].as_str().unwrap_or("?");
+    let state = if v["reloaded"] == true {
+        "the edge took it"
+    } else if v["applied"] == true {
+        "written; the edge reads it when it starts"
+    } else {
+        "the edge did not take the new config and may still serve the name; remove it again once the edge runs"
+    };
+    if v["removed"] == true {
+        format!(
+            "stopped serving {url} (was {}:{}): {state}",
+            v["instance"].as_str().unwrap_or("?"),
+            v["port"]
+        )
+    } else {
+        format!("{url} had no route; the edge's config was written again: {state}")
+    }
+}
+fn summary_route_list(v: &Value) -> String {
+    let routes = v["routes"].as_array().map_or(0, Vec::len);
+    match v["edge"]["name"].as_str() {
+        Some(edge) => format!("{routes} route(s) on the edge {edge}"),
+        None => "no edge on this node".into(),
+    }
+}
+
+/// The checks of every `instance_move_preflight` row, in the order each row lists them.
+pub const MOVE_PREFLIGHT_CHECKS: [&str; 8] = [
+    "size",
+    "storageDriver",
+    "cpu",
+    "devices",
+    "networks",
+    "projectsProfilesAcls",
+    "proxyListen",
+    "macvlanParents",
+];
+
+fn instance_move_preflight_params() -> Value {
+    let reference = params(vec![
+        (
+            "project",
+            true,
+            json!({
+                "description": "The Incus project the instance is in, on this node.",
+                "maxLength": 63,
+                "minLength": 1,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$",
+                "type": "string"
+            }),
+        ),
+        ("name", true, instance_name_schema()),
+    ]);
+    params(vec![
+        (
+            "instances",
+            true,
+            json!({
+                "description": "The instances to check, in the order the rows answer them: 1 to 50 references. One instance is a list of one. An earlier instance whose size fits counts as already destined for the target when a later one is sized.",
+                "items": reference,
+                "maxItems": 50,
+                "type": "array"
+            }),
+        ),
+        (
+            "target",
+            true,
+            json!({
+                "description": "The target node: the name of one of this kernel's linked hosts (approval.linkedHosts). Its facts are read through that host's incusSocket.",
+                "maxLength": 253,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$",
+                "type": "string"
+            }),
+        ),
+        (
+            "live",
+            false,
+            json!({
+                "description": "Check for a live (stateful) move: the target's CPU must then have every CPU feature of this host. Absent or false, a cold move, where a missing feature is a risk and not a blocker.",
+                "type": "boolean"
+            }),
+        ),
+    ])
+}
+
+fn instance_move_preflight_result() -> Value {
+    let finding = result(vec![
+        ("subject", true, string()),
+        ("ok", true, boolean()),
+        ("detail", true, string()),
+        ("proposal", true, nullable(string())),
+    ]);
+    let measure = result(vec![
+        ("method", true, nullable_enum(&["walked"])),
+        ("path", true, nullable(string())),
+        ("instanceBytes", true, nullable(int())),
+        ("snapshotBytes", true, nullable(int())),
+        ("volumeBytes", true, nullable(int())),
+        ("hostFolderBytes", true, nullable(int())),
+        ("notMeasured", true, nullable(string())),
+        ("measuredBytes", true, nullable(int())),
+        ("headroomBytes", true, nullable(int())),
+        ("neededBytes", true, nullable(int())),
+        ("neededWithoutSnapshotsBytes", false, nullable(int())),
+        ("fitsWithoutSnapshots", false, nullable(boolean())),
+        ("sourcePool", true, nullable(string())),
+        ("targetPool", true, nullable(string())),
+        ("targetFreeBytes", true, nullable(int())),
+        ("pendingBytes", true, int()),
+        ("pendingFor", true, array(string())),
+        ("availableBytes", true, nullable(int())),
+    ]);
+    let check = result(vec![
+        ("check", true, one_of(&MOVE_PREFLIGHT_CHECKS)),
+        ("ok", true, boolean()),
+        ("detail", true, string()),
+        ("findings", true, array(finding)),
+        ("risks", true, array(string())),
+        ("measure", false, measure),
+        ("sourceDriver", false, nullable(string())),
+        ("targetDriver", false, nullable(string())),
+        ("crossesDriver", false, nullable(boolean())),
+        ("live", false, boolean()),
+        ("missingFeatures", false, array(string())),
+        ("sourceBaseline", false, nullable(string())),
+        ("targetBaseline", false, nullable(string())),
+    ]);
+    let row = result(vec![
+        ("project", true, string()),
+        ("name", true, string()),
+        ("target", true, string()),
+        ("go", true, boolean()),
+        ("reason", true, nullable(string())),
+        ("checks", true, array(check)),
+    ]);
+    result(vec![
+        (
+            "target",
+            true,
+            result(vec![
+                ("name", true, string()),
+                ("reachable", true, boolean()),
+                ("reason", true, nullable(string())),
+            ]),
+        ),
+        ("live", true, boolean()),
+        ("rows", true, array(row)),
+    ])
+}
+
+/// A short line for a successful `instance_move_preflight`.
+pub fn summary_move_preflight(v: &Value) -> String {
+    let rows = v["rows"].as_array().map_or(&[][..], Vec::as_slice);
+    let go = rows.iter().filter(|row| row["go"] == true).count();
+    let target = v["target"]["name"].as_str().unwrap_or("?");
+    let unread = if v["target"]["reachable"] == false {
+        " (the target could not be read)"
+    } else {
+        ""
+    };
+    format!(
+        "{} instance(s) to {target}: {go} go, {} no-go{unread}",
+        rows.len(),
+        rows.len() - go
+    )
+}
 
 fn host_network_restore_params() -> Value {
     params(vec![("approval", true, approval_schema())])
@@ -2446,7 +2802,7 @@ fn plan_list_result() -> Value {
 }
 
 /// The twenty-four verbs an action proposal may name. The list is closed here and checked by the handler again.
-const ACTION_NAMES: [&str; 24] = [
+const ACTION_NAMES: [&str; 26] = [
     "service_create",
     "service_remove",
     "service_update",
@@ -2471,6 +2827,8 @@ const ACTION_NAMES: [&str; 24] = [
     "function_create",
     "function_remove",
     "host_network_restore",
+    "route_add",
+    "route_remove",
 ];
 
 /// A plan or action proposal id: a delete plan's 64 hex digits, or an action proposal's `act-` and twelve.
@@ -2543,7 +2901,7 @@ pub fn kernel_filled(action: &str) -> &'static [&'static str] {
 }
 
 /// One `args` of each action, as an assistant proposes it: the fields it must name, and no field in [`KERNEL_FILLED`].
-const ACTION_EXAMPLES: [(&str, &str); 24] = [
+const ACTION_EXAMPLES: [(&str, &str); 26] = [
     ("service_create", r#"{"name":"nats","template":"nats"}"#),
     ("service_remove", r#"{"name":"nats"}"#),
     (
@@ -2586,6 +2944,11 @@ const ACTION_EXAMPLES: [(&str, &str); 24] = [
     ),
     ("function_remove", r#"{"name":"relay"}"#),
     ("host_network_restore", r#"{}"#),
+    (
+        "route_add",
+        r#"{"hostname":"app.example.com","instance":"web","port":8080}"#,
+    ),
+    ("route_remove", r#"{"hostname":"app.example.com"}"#),
 ];
 
 /// The schema keyword that tells the door's check which branch of an `anyOf` a value is held to: the one whose `title`
@@ -3851,7 +4214,7 @@ pub fn summary_service_update(v: &Value) -> String {
     if v.get("follow").is_some() {
         "Service's follow setting changed.".to_string()
     } else if v["updated"] == false {
-        "Service already on that digest.".to_string()
+        "Service already runs that image.".to_string()
     } else if v.get("noNewPrivileges").is_some() {
         "Service's no-new-privileges setting changed.".to_string()
     } else {
@@ -3874,7 +4237,7 @@ fn service_update_params_base() -> Value {
                 "type": "string"
             },
             "digest": {
-                "description": "The image digest to move to: sha256: and 64 lower-case hex digits. The service keeps its image's repository. Give it, or follow, not both.",
+                "description": "The image to move to: sha256: and 64 lower-case hex digits. For an OCI image, the digest, and the service keeps its image's repository; for a service made from a local image pinned by fingerprint, the new image's fingerprint. Give it, or follow, not both.",
                 "pattern": "^sha256:[0-9a-f]{64}$",
                 "type": "string"
             },
