@@ -5148,8 +5148,13 @@ What the pool does with it:
   starts. The slot then clears its registration and says in `service_logs`: `GitHub no longer has the registration of
   its runner ...`. To bring it back, drop a new token: `service_secret_set` of `GITHUB_REGISTRATION_TOKEN`, then
   `instance_start`. Nothing is done inside the machine. Slots that still have their registration keep running.
-- `runnerGroup` is not the organisation's default group: `Default` is refused, as the `jit` mode refuses the default
-  group's id, unless the template sets `allowDefaultRunnerGroup`.
+- `runnerGroup` can be the organisation's default group (`Default`), for an organisation that has no other: the pool
+  then says a `WARNING` at its start and in every status block, because every repository that group admits can send
+  jobs to these persistent runners. A group limited to selected repositories is safer. (The `jit` mode refuses the
+  default group unless the template sets `allowDefaultRunnerGroup`.)
+- A token put in at the same moment as a start, before the pool has found that GitHub dropped a slot's registration,
+  can be deleted as unneeded while every slot still looks registered. If a slot then waits for a token, run
+  `instance_start` again within the token's hour: Arca writes the stored token again and the slot registers with it.
 
 **This mode keeps per-slot state between jobs.** The slot's runner is persistent: it takes job after job in the same
 container, beside the same Docker daemon, with the same work directory (`_work`), the same Docker layer cache, the
@@ -5169,7 +5174,8 @@ mode is a bridge until each job runs in a fresh machine of its own; the `jit` mo
 - **So the runner group is the wall.** Everyone who can get a workflow run in a repository the runner group admits
   (by pushing a branch there, or through an approved pull request) can, in effect, hold the credential, and what the
   credential can do is in the table of step 2. Admit only repositories where you would trust every person with write
-  access that far. That is why the pool refuses the default runner group and why public repositories stay off.
+  access that far. That is why the `jit` mode refuses the default runner group (the registration-token mode takes it with a
+  warning) and why public repositories stay off.
 - **Nothing beyond the virtual machine.** A job that takes over the virtual machine has the virtual machine: its own
   disk, and the network it is on. It does not have the machine Arca runs on, Arca's other services or Arca's secrets.
 

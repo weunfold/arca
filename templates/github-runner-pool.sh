@@ -328,12 +328,6 @@ load_settings() {
       say "settings: runnerGroup is at most 100 characters"
       return 1
     }
-    # The default group is refused as in the jit mode, unless the settings say allowDefaultRunnerGroup: every
-    # repository that group admits could send its jobs to these runners.
-    if [ "${GROUP_NAME,,}" = default ] && [ "$ALLOW_DEFAULT_GROUP" != true ]; then
-      say "settings: runnerGroup is \"$GROUP_NAME\", the organisation's default runner group: every repository that group admits could send its jobs to this pool's runners. Create a runner group for this pool, limited to selected repositories and with public repositories off, and name it in runnerGroup"
-      return 1
-    fi
   fi
   [ -z "$repo" ] || GROUP_NAME=''
   MAX_SLOTS=$(setting .maxSlots)
@@ -1153,10 +1147,11 @@ slot_cycle() {
       record_job "$slot" "$finished" "${job:-unknown}" unknown "$seconds" "$peak" $((cpu - cpu_mark)) "$name"
       recorded=$((recorded + 1))
     fi
-    # What the runner said before it stopped, kept for the words below: the log goes with its container.
-    lines=$(docker logs "$runner" 2>&1)
+    # What the runner itself said before it stopped, kept for the words below (the log goes with its container), without
+    # the lines that name its jobs: a job's name could hold the same words.
+    lines=$(docker logs "$runner" 2>&1 | grep -v -e 'Running job: ' -e 'completed with result: ')
     slot_reap "$slot"
-    case $lines in *'registration has been deleted'* | *'please re-configure'* | *'Not configured'*)
+    case $lines in *'registration has been deleted'* | *'please re-configure'* | *'no longer exists on the server'* | *'Cleaning up local configuration'* | *'Not configured'*)
       # GitHub no longer has this runner's registration: it was removed on GitHub, it had not connected for 14 days
       # (GitHub then drops a persistent runner), or another runner took its name. The registration is cleared, so the
       # slot registers again with the next registration token instead of starting a runner GitHub refuses.
@@ -1941,6 +1936,11 @@ pool() {
   local pause=0 verdict
   if [ -n "$REG" ]; then
     GROUP_NOTE="${GROUP_NAME:+runner group \"$GROUP_NAME\", }registration-token mode: one persistent runner per slot, registered once, which keeps its container, work directory and caches between jobs"
+    # The default group is taken, as an organisation without others has no choice, and said in every status block:
+    # every repository it admits can send jobs to these runners.
+    if [ "${GROUP_NAME,,}" = default ]; then
+      GROUP_NOTE="$GROUP_NOTE, WARNING: the default runner group: every repository it admits can send jobs to these persistent runners; a group limited to selected repositories is safer"
+    fi
     say "registering runners in $GROUP_NOTE"
     reg_waiting
   fi

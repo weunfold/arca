@@ -67,6 +67,12 @@ play_runner() {
   local dir=$1 jit=$2 tools_mounted=$3 persistent=${4-} answer job seconds result listening=''
   # A just-in-time runner says it listens at once. A persistent one says so once GitHub has taken its registration,
   # as the real runner does after it has made its session; one GitHub no longer has says what the real one says.
+  # A test can make a persistent runner end at once, before it reaches GitHub, as one whose start fails does.
+  if [ -n "$persistent" ] && [ -n "${FAKE_PERSISTENT_DIES:-}" ]; then
+    echo "An error occurred: the runner could not start" >>"$dir/log"
+    end_play 1
+    return
+  fi
   if [ -z "$persistent" ]; then
     echo "Connected to GitHub" >>"$dir/log"
     echo "Listening for Jobs" >>"$dir/log"
@@ -123,6 +129,13 @@ play_runner() {
       return
     fi
     if [ "$(printf '%s' "$answer" | jq -r '.gone // empty' 2>/dev/null)" = true ]; then
+      # What runner 2.338.2 says: one removed while it listens cleans up and ends with 0; one refused as it makes its
+      # session ends with an error.
+      if [ -n "$persistent" ] && [ -n "$listening" ]; then
+        echo "$(date -u '+%Y-%m-%d %H:%M:%S')Z: The runner no longer exists on the server. Cleaning up local configuration." >>"$dir/log"
+        end_play 0
+        return
+      fi
       if [ -n "$persistent" ]; then
         echo "Failed to create a session. The runner registration has been deleted from the server, please re-configure. Runner registrations are automatically deleted for runners that have not connected to the service recently." >>"$dir/log"
         echo "Runner listener exit with terminated error, stop the service, no retry needed." >>"$dir/log"

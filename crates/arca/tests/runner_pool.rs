@@ -4858,15 +4858,18 @@ fn a_registration_token_github_refuses_is_said_and_deleted_after_its_hour_and_th
     pool.stop();
     drop(pool);
 
-    // The default group is refused by its name, as the jit mode refuses it by its id.
+    // The default group is taken, for an organisation that has no other, and said in every status block.
     let mut pool = registration_pool(1, |settings| settings["runnerGroup"] = json!("Default"));
     pool.start(&github);
-    wait_for(&pool, "the default group refused", || {
-        pool.output().contains(
-            "settings: runnerGroup is \"Default\", the organisation's default runner group",
-        )
+    let warning = "runner group \"Default\", registration-token mode: one persistent runner per slot, registered once, which keeps its container, work directory and caches between jobs, WARNING: the default runner group: every repository it admits can send jobs to these persistent runners; a group limited to selected repositories is safer";
+    wait_for(&pool, "the default group's warning at the start", || {
+        pool.output()
+            .contains(&format!("registering runners in {warning}"))
     });
-    pool.stop();
+    wait_for(&pool, "the warning in the status", || {
+        pool.read("logs/status.txt").contains(warning)
+    });
+    assert_eq!(pool.stop(), Some(0));
     drop(pool);
 
     let mut pool = registration_pool(1, |settings| settings["registration"] = json!("ephemeral"));
@@ -5051,5 +5054,35 @@ fn two_pools_of_one_name_keep_their_own_runners() {
     );
     assert_eq!(first.stop(), Some(0));
     assert_eq!(second.stop(), Some(0));
+    let _ = fs::remove_dir_all(scratch);
+}
+
+/// A persistent runner that stops before it reaches GitHub is a failure like any other: the pause before the slot
+/// starts again grows, and is not set back by the slot's own start, which reaches nothing.
+#[test]
+fn a_persistent_runner_that_never_reaches_github_backs_off_longer_each_time() {
+    let scratch = scratch_dir();
+    let github = Github::start(&scratch, &format!("/orgs/{ORG}"));
+    github.state().registration_token = Some(REGISTRATION_TOKEN.to_string());
+    let mut pool = registration_pool(1, |_| {});
+    pool.env.push(("POOL_BACKOFF_MAX", "20".to_string()));
+    pool.env.push(("FAKE_PERSISTENT_DIES", "1".to_string()));
+    pool.secret("GITHUB_REGISTRATION_TOKEN", REGISTRATION_TOKEN);
+    pool.start(&github);
+    wait_for(&pool, "the second pause, twice the first", || {
+        pool.output().contains(
+            "its persistent runner pool1-abcd1234-0 stopped (exit 1) before it took a job. Slots start again in 10 seconds",
+        )
+    });
+    assert_eq!(
+        pool.output()
+            .matches("before it took a job. Slots start again in 5 seconds")
+            .count(),
+        1
+    );
+    // Registered once: its registration is kept, as nothing says GitHub dropped it.
+    assert_eq!(github.state().registered.len(), 1);
+    assert!(pool.dir.join("state/registered/0/.runner").exists());
+    assert_eq!(pool.stop(), Some(0));
     let _ = fs::remove_dir_all(scratch);
 }
