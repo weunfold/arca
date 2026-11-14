@@ -186,7 +186,7 @@ refused without the value being echoed back.
 | `canvasOrigin` | no | The loopback DSH origin the remote canvas proxies: an `http://` literal loopback IP and port, with no path. Default `http://127.0.0.1:3081`; any other origin refuses the config before `serve` listens. |
 | `approval.trustOwnerKeysFrom` | no | Absolute paths of other kernels' owner passkeys files on this machine, which this kernel also trusts, read-only, for action approvals only (never to change its own passkeys). See "Approving on another kernel of this machine". |
 | `approval.origins` | with `trustOwnerKeysFrom` | The page origins (`approvalOrigin` form) a passkey from those files may answer from. A line for any other origin is not trusted. |
-| `approval.linkedHosts` | no | `[{ "name": "<host>", "socket": "<path>", "tokenFile": "<path>" }]`: the kernels on this machine whose proposals this kernel's approval page lists and relays approvals to. |
+| `approval.linkedHosts` | no | `[{ "name": "<host>", "socket": "<path>", "tokenFile": "<path>", "incusSocket": "<path>" }]`: the kernels on this machine whose proposals this kernel's approval page lists and relays approvals to. The optional `incusSocket` is that host's Incus socket on this machine (local, or forwarded to a path here); `instance_move_preflight` reads the host through it, with GETs only. |
 
 The config is refused, with exit 2, when:
 
@@ -864,9 +864,17 @@ upgrade, as any shipped template nobody edited. A service made before keeps runn
 is its own instance, and the upgrade does not touch it. Its `service_status` shows the newer release under `update`
 (`"state": "differs"`, the new digest as `templatePin`). A new service pulls 3.136.4.
 
-Keep a running service on the release it has: Arca has no way yet to move one to its template's version in place.
-The only way today is a `service_remove` and a `service_create`, and the remove deletes the service's data, which
-Arca cannot put back into the new service:
+Keep a running service on the release it has, unless you move it yourself: Arca does not move one to its template's
+version by itself. A container moves in place with `service_update {name, digest}`: to the digest an OCI template now
+names, or, for a service made from a local image pinned by fingerprint, to that image's fingerprint, which must
+already be in the service project's image store. An update in place needs an image pinned by digest or fingerprint, a
+template port for the health check, and the service's data on a declared volume (a template `data` path): the rebuild
+replaces the root, so whatever the service keeps there is gone, and a service whose template declares a volume it does
+not have is refused. A service that keeps data on its root, whose image is not pinned, or whose template declares no
+port, is not updatable in place: copy the data out, or create a new service. Keep the old image in the store until the
+update has succeeded, since a rollback in a project without snapshots rebuilds the old root from it. A virtual machine
+has no update path: the way is a `service_remove` and a `service_create`, and the remove deletes the service's data,
+which Arca cannot put back into the new service:
 
 - The server's `/data` is its own volume, `<name>-data`, which `service_remove` deletes with the instance. A snapshot
   of the instance leaves that volume out; it needs its own: `snapshot_create` with `{project: "arcak-svc", volume:
@@ -1576,17 +1584,19 @@ record is refused.
 ### Updating a service to a new image digest
 
 `service_update` takes `{name, digest, timeoutSeconds?, eraseData?, tenant?}` (or `{name, follow}`, see below) and
-moves a running container service made from an image by digest (today `automagik-server`) to another digest of the
-same image in one call. It is a destructive verb (it takes the optional `confirm`), needs a `doctor` token and asks
-the owner for nothing, except for `eraseData` (see below); it works inside a tenant as outside one. There is no
-update path for `automagik-workspace` yet: it is a virtual machine, whose Docker pulls its own server image, and the
-verb refuses it. In order, each step a line in `service-updates.jsonl` in the
+moves a running container service made from an image by digest (today `automagik-server`) or from a local image
+pinned by fingerprint (a template's `local:<alias>` beside a `digest`, see "A local image may be pinned") to another
+digest, or fingerprint, in one call. It is a destructive verb (it takes the optional `confirm`), needs a `doctor`
+token and asks the owner for nothing, except for `eraseData` (see below); it works inside a tenant as outside one.
+There is no update path for `automagik-workspace` yet: it is a virtual machine, whose Docker pulls its own server
+image, and the verb refuses it. In order, each step a line in `service-updates.jsonl` in the
 state directory (an append-only file of JSON lines: a `begin`, one line per step, an `end`; never a secret):
 
 1. the instance is stopped, if it runs, and a snapshot of it, `pre-update-<time>`, is taken where the project allows
    one. No project Arca makes does (each is restricted, and Incus answers that it does not allow snapshot creation),
    so on a node as Arca makes it there is no snapshot, and the answer's `snapshot` is `null`;
-2. its root is rebuilt from `<repository>@<digest>`; Incus may take up to 10 minutes to fetch the image. Incus keeps
+2. its root is rebuilt from `<repository>@<digest>`, or, for a local pinned image, from the project's own copy of the
+   image whose fingerprint is `digest`; Incus may take up to 10 minutes to fetch an OCI image. Incus keeps
    what is not the root: the config, the secrets, the firewall rules and the data volume (a template's `data`
    path, `/data` for `automagik-server`). Whatever the old version wrote to its own root is gone, so **an update of a
    service that keeps its data on its root disk is refused** (see "A service that keeps its data inside the
@@ -1608,10 +1618,25 @@ the old version is started as it is, and the refusal says so. If Incus does not 
 rolled back, so as not to rebuild twice at once: the refusal is `update_unsettled`, and the same update may be asked
 for again once Incus is idle. If the old version cannot be put back, the refusal is `rollback_failed`, says so, and
 leaves the service stopped. A failure before anything is changed (the digest is malformed, the service is not made
-from an image by digest, its instance is not the one Arca created, it has never been started, the snapshot failed for
+from an image by digest or a local image pinned by fingerprint, the image a local update names is not in the service
+project's image store, its instance is not the one Arca created, it has never been started, the snapshot failed for
 a reason other than the project not allowing one) says "Nothing was changed". A call for the digest the service
 already runs changes nothing and answers `updated: false`. A service being updated refuses a second update until
 the first ends. The call is synchronous and can take several minutes: the journal keeps what it did.
+
+A local image is moved by fingerprint: the call's `digest` is the new image's fingerprint (`sha256:` and 64 lower-case
+hex digits, as Incus writes it), and the image must be in the service project's own image store before anything is
+changed. The node reads that store first and refuses, before it stops the service and with "Nothing was changed", when
+no image there has that fingerprint, saying how to put it there (`incus image copy <image> local: --alias <alias>
+--project arcak-svc`, or a build in that project). `action_propose` does not read the image store: a card made before
+the image is put there can be approved, and its run is then refused before anything is changed. The record's alias
+becomes the installed template's alias when that template pins the same fingerprint, and stays what it was otherwise;
+the fingerprint decides which image Incus uses. **Keep the old image in the store until the update has succeeded**: a
+rollback in a project that allows no snapshot rebuilds the old root from the old fingerprint. If that image is gone, a
+rollback after a failed start or health check answers `rollback_failed`; after a failed new rebuild the old root was
+never taken away, so the answer is `rolled_back` with the old root kept. A project that allows snapshots restores the
+snapshot instead, and the record still names the old image either way. The update rebuilds from the project's own copy,
+never from an alias alone; a rebuild from an image the store no longer holds fails before it takes the old root away.
 
 #### A service that keeps its data inside the container
 
@@ -1797,7 +1822,7 @@ unix socket. The verbs
 in this build are `arca_status`, `node_metrics`, `watch_report`, `alerts_list`, `token_list`, `journal_list`, `plan_list`,
 `action_propose`, `plan_decline`, `approval_submit`, `action_approve`, `peer_keys_sync`, the Postgres and ontology verbs, `service_create`, `service_list` and
 `service_status`, `gpu_attach` and `gpu_detach`, `storage_list`, `storage_add`, `snapshot_create`, `snapshot_list` and
-`snapshot_delete`, and `instance_start`, `instance_stop` and `instance_restart`.
+`snapshot_delete`, `instance_start`, `instance_stop` and `instance_restart`, and `instance_move_preflight`.
 
 The unix socket serves only a peer whose credentials carry the server's own uid. Any other peer is closed before a byte of
 its request is read.
@@ -2170,6 +2195,72 @@ with `"secrets":null`: it names the secrets and never holds a value or a reason 
 The `begin` line is durable before anything is sent to Incus:
 when it cannot be written (the file is a link, or is not mode 0600) the call is refused with `InstanceJournalUnavailable`
 and nothing changes. A file past 8 MiB is set aside as `instance-actions.jsonl.1`, replacing the one set aside before.
+
+## Before moving an instance: `instance_move_preflight`
+
+`instance_move_preflight` (viewer) answers, before anything is moved, whether a target node can take each instance and
+what to fix first. It changes nothing: it sends only GETs, to this node's Incus and to the target's, and walks the
+instance's storage folder on this host to measure it. Nothing is stopped, started, copied or created, no proposal is
+recorded, and no journal or state file is written. Every finding is a check in the instance's row; the verb itself
+refuses only arguments it cannot read.
+
+It takes `instances`, a list of 1 to 50 `{project, name}` references on this node (one instance is a list of one), the
+`target`, and an optional `live` (default `false`). The target is one of this kernel's linked hosts
+(`approval.linkedHosts`), named as the config names it, whose `incusSocket` is that host's Incus socket here. A target
+with no such linked host, with no `incusSocket`, or whose Incus does not answer is not a refusal: `target.reachable` is
+`false`, `target.reason` says why, and every row is no-go with that reason.
+
+The answer has one row per instance, in the order asked: its `project`, `name` and `target`, `go`, a `reason` when it is
+no-go, and eight `checks`, always all eight and always in this order. Each check is `ok` or not, with a `detail` an
+operator can act on, `findings` (each with its `subject`, `ok`, `detail` and a `proposal`), and `risks` that do not
+block the move by themselves. `go` is true only when every check is ok.
+
+| Check | What it reads | Not ok when |
+|-------|---------------|-------------|
+| `size` | Everything that lands on the target pool, measured on this host by walking it: the instance's own folder (`<incus dir>/storage-pools/<pool>/containers/<project>_<name>`, or `virtual-machines/`), its snapshots (each counted in full, so the need is an upper bound), each custom volume it mounts that is not on the target yet and lands on the same pool (Incus keeps it at `custom/<project>_<name>`, `default_<name>` when the instance's project does not set `features.storage.volumes`), and each host folder it mounts. A file counts at its size or its blocks, whichever is larger, and a file with several links once. On btrfs and dir the folders are always there; on zfs, lvm and ceph a container's volume is walked only while Incus has it mounted, and a virtual machine's disk there is a block volume that is not walked. Incus's own usage figure is never used: it leaves out data shared with a snapshot or an image clone. It adds 10% headroom and compares that with the target pool's free space less every earlier instance of the same call that fits there. `measure` holds every number, part by part. | The need is larger than what is left, or the free space cannot be read. The row also gives the need without the snapshots (`neededWithoutSnapshotsBytes`, `fitsWithoutSnapshots`) and says "fits without snapshots" when only that one fits. When anything cannot be walked (an unmounted or block volume, an unknown driver, a folder the kernel's user cannot read) the size is not measured: not ok, with `measure.notMeasured` and the detail giving the reason. |
+| `storageDriver` | The driver of the instance's pool here and of the target pool (the pool of the same name, else the one the target's default profile names). | The target has no such pool. A move across drivers is ok, with `crossesDriver: true` and the risk said: Incus copies the files one by one instead of sending a btrfs or zfs stream. |
+| `cpu` | Both hosts' CPU features (`/1.0/resources`), their x86-64 levels, and whether the target runs the instance's architecture. | The target does not run the architecture; or, with `live: true`, it lacks any CPU feature of this host (`missingFeatures` names them). On a cold move a missing feature is a risk: programs built for this host's CPU may use it. |
+| `devices` | Each GPU, GPU node (`/dev/dri/...`), other `unix-char` or `unix-block` device, USB and PCI device, custom volume and host folder disk. | The target lacks it. A host device Incus does not list cannot be confirmed and is not ok unless the device says `required=false`. A host folder disk is always not ok: its data stays here, and the proposal names a custom volume on the target to copy it into. |
+| `networks` | Each network card's network or parent, and its fixed address. | The target has no such network (the proposal names the same subnet as here), the fixed address is outside the target network's subnet, or another card holds it there. |
+| `projectsProfilesAcls` | The project and its `features.*`, each profile, and each ACL the cards or their networks name. | One is missing on the target or differs from here; each is named. |
+| `proxyListen` | Each proxy device's listen address. | It listens on an address of this host that the target does not hold; the proposal names the target's own addresses. Every-address and loopback listens move as they are. |
+| `macvlanParents` | Each macvlan card's parent interface, matched against the target's own interface names. | The target has no interface of that name. On IncusOS the bridge carries the network card's name and a `_p...` port is not a parent, so the proposal lists the target's own names. |
+
+To measure, the kernel's user needs read access to the Incus storage folders (`/var/lib/incus/storage-pools` and
+below) and to every host folder an instance mounts. On a standard host those are `root:root` with mode 0711, so a kernel
+that runs as an ordinary user cannot list them: its `size` check says "not measured" with the permission error and the
+path, and every other check still answers. Give the kernel's user read access there (for example through an ACL), or
+read the size from a kernel that can.
+
+A worked example. `node-a` holds the container `web` in the project `shop`, 4.0 GiB on a btrfs pool, with a fixed address
+on `arcabr0` and a proxy on `node-a`'s own address. Its config links `node-b`:
+
+```json
+"approval": { "linkedHosts": [ { "name": "node-b", "socket": "/run/arca-node-b/arca.sock",
+  "tokenFile": "/etc/arca/node-b-relay.secret", "incusSocket": "/run/arca-node-b/incus.sock" } ] }
+```
+
+```
+arca call instance_move_preflight '{"instances":[{"project":"shop","name":"web"}],"target":"node-b"}'
+```
+
+```json
+{ "target": { "name": "node-b", "reachable": true, "reason": null }, "live": false,
+  "rows": [ { "project": "shop", "name": "web", "target": "node-b", "go": false, "reason": "not ok: proxyListen",
+    "checks": [
+      { "check": "size", "ok": true, "detail": "measured 4.0 GiB (4294967296 bytes) by walking the instance 4.0 GiB at /var/lib/incus/storage-pools/default/containers/shop_web; with 10% headroom it needs 4.4 GiB. node-b's pool default has 120.0 GiB free, minus 0 B pending for earlier moves to it = 120.0 GiB available: it fits", "findings": [], "risks": [],
+        "measure": { "method": "walked", "measuredBytes": 4294967296, "headroomBytes": 429496729, "neededBytes": 4724464025, "targetFreeBytes": 128849018880, "pendingBytes": 0, "availableBytes": 128849018880, "...": "..." } },
+      { "check": "proxyListen", "ok": false, "detail": "not ok: https", "risks": [],
+        "findings": [ { "subject": "https", "ok": false,
+          "detail": "the proxy https listens on 203.0.113.10 port 443, an address of this host (enp6s0) that node-b does not have; on node-b it would not listen",
+          "proposal": "re-point https's listen to one of node-b's own addresses: 203.0.113.20 (br-lan), or to 0.0.0.0 for every address" } ] },
+      "... the other six checks, each ok ..."
+    ] } ] }
+```
+
+The operator re-points the proxy, then asks again; `go` turns true. Several instances in one call are sized one after
+another against the same pool: an earlier one that fits counts as pending for the later ones, and its name is in their
+`detail` and in `measure.pendingFor`.
 
 ## Snapshot storage and snapshots
 
@@ -4448,9 +4539,10 @@ install --replace` from a newer release. `service_status` answers both under `up
 key on any other row. Both are read from this node's own records and files: no registry is asked and nothing is
 written. Two digests carry no order, so `differs` never says which version is the newer one. A service made from a
 system image by an alias has no version of this kind and carries no `update` (`baseImage`, above, is what it has),
-and neither does an adopted instance. For a container made from an image by digest, `service_update` moves it to another digest (see "Updating a service
-to a new image digest"); for a virtual machine the only way is `service_remove` and `service_create`. This only tells you that
-there is one.
+and neither does an adopted instance. For a container made from an image by digest or a local image pinned by
+fingerprint, `service_update` moves it to another digest, or fingerprint (see "Updating a service to a new image
+digest"); for a virtual machine the only way is `service_remove` and `service_create`. This only tells you that there
+is one.
 
 A virtual-machine template says where its version is with one key:
 
@@ -4916,6 +5008,9 @@ since it is where the pool's credential will be used.
 | `runnerGroupId` | yes | The number of the runner group the runners join (step 1). Not used for a repository. |
 | `classes` | yes | The label sets, each with its slot size: `name` (a-z, 0-9), `labels` (what a job's `runs-on` asks for), `cpu`, `memory` and `slots` (how many runners of this class the pool keeps). Given at create, it replaces the whole list. Each class is checked like the template's first: whole numbers for `cpu` and `slots`, and a `memory` above zero and at most the machine's. The card shows one row a class. |
 | `maxSlots` | yes | The cap: never more than this many slots at once, whatever the classes add up to. Never below the number of classes: a create with less is refused ("A place for every class" below). |
+| `aptPackages` | yes | The Ubuntu packages added to the runner image, which the machine builds once ("The runner image's packages" below). The default is `["libatomic1", "build-essential", "zstd", "wget", "skopeo", "xz-utils", "zip", "rsync", "gh"]`. Given at create, it replaces the whole list, so name the defaults too when you add one; `[]` runs the runner image as it is. |
+| `registration` | yes | `jit` (the default): a just-in-time runner per job, registered with the pool's App or token. `registration-token`: no GitHub credential at all; each slot is registered once with a registration token and keeps its runner between jobs ("Without a GitHub credential" below). |
+| `runnerGroup` | yes | With `registration-token`, the runner group's name as GitHub shows it (config.sh names a group by name). Required for an organisation. |
 | `allowDefaultRunnerGroup` | no | `true` lets the pool start on the organisation's default runner group. Leave it out. |
 | `reserveMemory` | no | Memory kept back for the virtual machine itself. The slots share what is left. |
 | `dockerCache`, `dependencyCache` | no | The disk the Docker layer caches and the dependency caches may use, over all slots. |
@@ -5014,6 +5109,62 @@ boot failed has no pool; remove it with `service_remove` and create it again onc
 that one class has all of, for example `runs-on: [self-hosted, linux, x64, arca]`, or
 `[self-hosted, linux, x64, arca-large]` for a large slot.
 
+### Without a GitHub credential: a registration token
+
+Some organisations do not allow an App or a token that can register runners anywhere in the organisation. For them the
+pool has a second mode, `registration` set to `registration-token`, in which it holds no GitHub credential at all:
+
+1. Create the pool with `"registration": "registration-token"` and `"runnerGroup": "<the group's name>"` (for
+   example `{"registration": "registration-token", "runnerGroup": "arca-pool"}` beside `url` and `classes`).
+   `runnerGroupId` is not used in this mode.
+2. An organisation owner opens "Settings", "Actions", "Runners", "New self-hosted runner" and copies the token in
+   the `./config.sh --token` line. It lasts one hour and can only register runners.
+3. `service_secret_set` with `{"name": "ci-pool", "key": "GITHUB_REGISTRATION_TOKEN", "value": "<the token>"}`, then
+   `instance_start`. On a pool that runs, the same token written as `/etc/arca-secrets/GITHUB_REGISTRATION_TOKEN`
+   inside the machine (root's, mode 0600) is picked up within seconds, with no restart.
+
+What the pool does with it:
+
+- Each slot without a registration runs the runner's own `config.sh --unattended --replace` once, with the group,
+  the class's labels (GitHub adds `self-hosted`, `linux` and `x64` itself) and the name
+  `<pool>-<the pool's id>-<slot>`, and not `--ephemeral`. The pool's id keeps two pools of one name in one
+  organisation from taking each other's runners (`--replace` replaces a runner of the same name). The token reaches config.sh as a file on `/run` that its container reads into
+  `ACTIONS_RUNNER_INPUT_TOKEN`: it is on no command line, in no log and in no record of Docker's.
+- The runner's registration (`.runner`, `.credentials`, `.credentials_rsaparams`) is kept per slot in
+  `/var/lib/arca-runner-pool/registered/<slot>`, a folder only root enters (0700; the files 0600). Each runner has its
+  own credential, which can do nothing but connect that one runner.
+- The token is deleted once every slot is registered, or an hour after the pool first saw it, when GitHub no longer
+  takes it. Arca keeps the secret's value and writes it into the machine again at every start: the same token written
+  again is as old as it was and is deleted without being tried, so the stored value need not be cleared. A slot that
+  has its registration starts without one, also after a restart of the controller or of the machine. A refused token
+  is said in `service_logs` with config.sh's own last lines (`config.sh did not register the runner ...`), and the
+  slot tries again with backoff until the token is deleted; its whole output is in
+  `/var/log/arca-runner-pool/register-<slot>.log` inside the machine.
+- The pool asks GitHub's API nothing in this mode: it does not read the runner group, does not take stale runners
+  off, and does not retire an idle runner to give its place to another class. So give every slot a place
+  (`maxSlots` at least the number of slots): a persistent runner keeps its place.
+- When GitHub no longer has a slot's registration (the runner was removed on GitHub, the pool was off for more than
+  14 days, after which GitHub drops a persistent runner, or another runner took its name), its runner says so as it
+  starts. The slot then clears its registration and says in `service_logs`: `GitHub no longer has the registration of
+  its runner ...`. To bring it back, drop a new token: `service_secret_set` of `GITHUB_REGISTRATION_TOKEN`, then
+  `instance_start`. Nothing is done inside the machine. Slots that still have their registration keep running.
+- `runnerGroup` can be the organisation's default group (`Default`), for an organisation that has no other: the pool
+  then says a `WARNING` at its start and in every status block, because every repository that group admits can send
+  jobs to these persistent runners. A group limited to selected repositories is safer. (The `jit` mode refuses the
+  default group unless the template sets `allowDefaultRunnerGroup`.)
+- A token put in at the same moment as a start, before the pool has found that GitHub dropped a slot's registration,
+  can be deleted as unneeded while every slot still looks registered. If a slot then waits for a token, run
+  `instance_start` again within the token's hour: Arca writes the stored token again and the slot registers with it.
+
+**This mode keeps per-slot state between jobs.** The slot's runner is persistent: it takes job after job in the same
+container, beside the same Docker daemon, with the same work directory (`_work`), the same Docker layer cache, the
+same tool cache and the same files any job left in the runner's home. The slot is not cleaned per job; only the two
+cache budgets are checked after each job, as in the other mode. A job can therefore see what an earlier job on that
+slot left, and can leave something for a later one: use it only for repositories that trust each other. Each job is
+still recorded in `jobs.tsv` with its name, result and seconds, but its memory peak is the slot's since its runner
+started (a slice's peak cannot be set back while it runs), and its CPU time is the slot's since the job began. This
+mode is a bridge until each job runs in a fresh machine of its own; the `jit` mode stays as it was.
+
 ### Who can reach what
 
 - **A job can reach the pool's credential.** Jobs get Docker, and the Docker daemon of a slot runs privileged inside
@@ -5023,7 +5174,8 @@ that one class has all of, for example `runs-on: [self-hosted, linux, x64, arca]
 - **So the runner group is the wall.** Everyone who can get a workflow run in a repository the runner group admits
   (by pushing a branch there, or through an approved pull request) can, in effect, hold the credential, and what the
   credential can do is in the table of step 2. Admit only repositories where you would trust every person with write
-  access that far. That is why the pool refuses the default runner group and why public repositories stay off.
+  access that far. That is why the `jit` mode refuses the default runner group (the registration-token mode takes it with a
+  warning) and why public repositories stay off.
 - **Nothing beyond the virtual machine.** A job that takes over the virtual machine has the virtual machine: its own
   disk, and the network it is on. It does not have the machine Arca runs on, Arca's other services or Arca's secrets.
 
@@ -5099,8 +5251,30 @@ neither has been measured on the pool itself.
 ### What to know
 
 - **One job per runner.** A runner is registered for one job (GitHub calls it just-in-time and ephemeral), runs in a
-  container made from the runner's public image, and is removed with everything in it. The next job gets a new
+  container made from the pool's runner image (the runner's public image with `aptPackages` added), and is removed
+  with everything in it. The next job gets a new
   registration and a new container, so no job finds another's files, processes or installed packages.
+- **The runner image's packages.** The runner's public image is Ubuntu 24.04 with git, curl, jq, unzip, python3,
+  Docker's client and a passwordless `sudo`, and less than GitHub's own `ubuntu-latest`: no C compiler, no `make`, no
+  `libatomic1` (pnpm and other Node.js-based tools stop with `libatomic.so.1` missing), no `zstd` (`actions/cache`
+  then falls back to gzip, which is another cache version, so no cache saved with zstd restores), no `wget`, no
+  `skopeo`, no `xz-utils` (`tar -xJf` fails), no `zip`, no `rsync` and no `gh`. So before it begins any slot the controller builds one image on the machine: `FROM` the pinned runner
+  image, then `apt-get install --no-install-recommends` of `aptPackages` (by default `libatomic1`, `build-essential`,
+  which is `make`, `gcc` and `g++`, `zstd`, `wget`, `skopeo`, `xz-utils`, `zip`, `rsync` and `gh`, all from Ubuntu's
+  own archive, `skopeo` and `gh` from its universe component; Ubuntu's `gh` is older than GitHub's own apt repository,
+  which a list of package names cannot add). It is named `arca-runner-pool-<the pool's id>:<a digest of what it is built from>`, kept on the
+  machine's disk, and every runner starts from it; a controller that finds it built builds nothing. Node.js is not in
+  the list: a workflow sets up the version it wants with `actions/setup-node`, and the runner carries its own for
+  JavaScript actions only, off the `PATH`, so a workflow that runs `node` or `npm ci` without `actions/setup-node`
+  stops with "command not found" here, where `ubuntu-latest` has both (Ubuntu 24.04's own `nodejs` is 18, past its
+  end of life). Playwright's system libraries are not in it either: `npx playwright install --with-deps` installs
+  them in the job (the image's `sudo` needs no password), at the cost of a download per job. A build that fails (a mirror that cannot be reached, a name that is not a package) is said in
+  `service_logs`, with the image, the step and the package manager's last lines; no runner starts until a build
+  succeeds; while it keeps failing it is tried again after a minute, then two, four and so on, up to five minutes,
+  and each failed attempt's stopped container is removed. Docker's whole output is in
+  `/var/log/arca-runner-pool/runner-image-build.log` inside the machine. The packages come from Ubuntu's archive on
+  the day of the build, so two machines built on different days can differ in their versions; the runner image
+  underneath is the pinned one.
 - **Admission by memory.** A slot starts only while there is memory for its whole size: memory that no other slot has
   reserved, and memory the machine has free at that moment. A slot's memory is a hard limit with no swap, so a job that
   passes it is stopped by the kernel and no other slot pays for it. CPU is different: each slot has a ceiling of its
@@ -5124,8 +5298,14 @@ neither has been measured on the pool itself.
   the new value into the virtual machine, and the controller uses it for the next token. To retire a credential a job
   may have taken, delete the App's key (or the token) on GitHub: that, not Arca, makes it worthless.
 - **Stopping and restarting.** `instance_stop` and `instance_restart` need your approval. Runners that are idle are
-  taken off GitHub first; a job that is running is lost and GitHub reports it as failed. After the machine Arca runs
-  on restarts, the pool starts by itself.
+  taken off GitHub first; a job that is running is lost and GitHub reports it as failed, because the machine's
+  Docker stops with it. After the machine Arca runs on restarts, the pool starts by itself. An orderly stop or
+  restart of the controller service alone, inside a running machine, leaves a runner at its job to finish it: the
+  controller leaves it running, the controller that starts next watches it to its end and records its job, and only
+  then is its slot given a new runner, from the runner image of that controller. That is for an orderly stop only.
+  A crash, an out-of-memory kill or a stop of the machine can lose a running job: a controller that dies before it
+  writes the note leaves the next one nothing to adopt, and a stopped machine takes its Docker with it, so GitHub
+  reports the job as failed.
 - **Pins, and what you are trusting.** The runner is `ghcr.io/actions/actions-runner` 2.338.2 and the slot's daemon is
   `docker` 29.9.3-dind, both by digest: the bytes are fixed. The virtual machine is `images:debian/13/cloud`, the
   public Debian 13 image with cloud-init (which runs the first boot and grows the disk), named by its alias and not by

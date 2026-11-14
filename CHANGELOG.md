@@ -7,6 +7,30 @@ What changed in each release of Automagik Arca, in plain words. The newest relea
 <!-- The release writes the next section here by itself: one line per change that landed, from its commit subject.
 Write under this comment only what a reader needs beyond those lines; the release puts its heading above it. -->
 
+The `github-runner-pool` controller builds one runner image on its machine before it begins any slot: the pinned
+runner image with the Ubuntu packages of a new setting, `aptPackages` (by default `libatomic1`, `build-essential`,
+`zstd`, `wget`, `skopeo`, `xz-utils`, `zip`, `rsync` and `gh`, which GitHub's `ubuntu-latest` has and the runner image lacks; settable at create), and
+every runner starts from it. Without `zstd` no `actions/cache` saved with it restores; without `libatomic1` pnpm cannot
+start.
+A build that fails is said in `service_logs` with the step and the package manager's last lines, no runner starts
+without the image, and it is tried again after a minute, then less and less often (up to five minutes). An orderly
+stop or restart of the controller inside the machine leaves a runner at its job to finish it, and the next controller
+records it; a crash or an out-of-memory kill can lose the job. A pool that exists keeps the script and the settings it
+was created with: it gets neither until it is created again.
+
+The `github-runner-pool` template has a second registration mode for organisations that allow no App or token able to
+register runners anywhere: `registration` set to `registration-token`, with `runnerGroup` naming the group. An owner's
+one-hour registration token (the secret `GITHUB_REGISTRATION_TOKEN`) registers each slot once as a persistent runner;
+each runner keeps its own registration in a root-only folder, the token is deleted once every slot is registered, and
+the pool holds no GitHub credential. This mode keeps each slot's container, work directory and caches between jobs: a
+bridge until each job has a machine of its own. The `jit` mode is unchanged.
+
+`service_update` now moves a running container service made from a local image pinned by fingerprint, as it already
+moves one made from an image by digest on a registry: the call's `digest` is the new image's fingerprint, the image
+must already be in the service project's image store, the record takes the alias the installed template pins it under
+(or keeps its own), and the data volume is kept. Keep the old image in the project store until the update has
+succeeded: a rollback in a project without snapshots rebuilds the old root from it.
+
 ## 0.29.0 (2026-11-13)
 
 A function whose `command` is a shell and its script (`["/bin/sh", "-c", <script>]`) now starts on a node whose Incus

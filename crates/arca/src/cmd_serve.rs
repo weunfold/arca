@@ -460,6 +460,12 @@ pub fn serve(flags: &Flags) -> Result<Option<Value>, Failure> {
             }),
         )
         .handle(
+            "instance_move_preflight",
+            Arc::new(crate::move_preflight::MovePreflightHandler::new(Arc::new(
+                cfg.clone(),
+            ))),
+        )
+        .handle(
             "snapshot_list",
             Arc::new(crate::handlers::SnapshotListInTenant {
                 inner: Arc::new(crate::storage::SnapshotListHandler {
