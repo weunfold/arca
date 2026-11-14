@@ -21,20 +21,25 @@ const sum = (values) => values.reduce((a, b) => a + (b ?? 0), 0);
 
 /**
  * A runner label as `--move-to` takes it: one plain runs-on label, which the pull request writes into a workflow. It
- * starts with a letter, so YAML reads it written plain as a string (not `-`, `.inf` or `1e3`). It names the owner's
- * own pool, so a GitHub-hosted or Blacksmith label is refused: jobs on it would be priced at $0 and the report would
- * understate what is billed.
+ * starts with a letter, so YAML reads it written plain as a string (not `-`, `.inf` or `1e3`). That is the only check:
+ * a label whose name looks GitHub-hosted is still taken (`linux` is a self-hosted default), and the move says so.
  */
 export function checkLabel(label) {
   if (label == null) return null;
   if (typeof label !== 'string' || !/^[A-Za-z][A-Za-z0-9._-]{0,99}$/.test(label)) {
     throw new Error(`--move-to takes one runner label (a letter, then letters, digits, '.', '_' and '-'), not ${JSON.stringify(label)}`);
   }
-  const { kind } = runnerOf([label]);
-  if (kind === 'github' || kind === 'blacksmith') {
-    throw new Error(`--move-to names the owner's own runner pool; ${label} is a ${kind === 'github' ? 'GitHub-hosted' : 'Blacksmith'} runner`);
-  }
   return label;
+}
+
+/** An evidence line when the pool's label reads, by its name alone, as a runner GitHub or Blacksmith hosts. */
+function hostedLooking(label) {
+  const { kind } = runnerOf([label]);
+  if (kind !== 'github' && kind !== 'blacksmith') return [];
+  const who = kind === 'github' ? 'GitHub' : 'Blacksmith';
+  return [
+    `${label} reads by its name like a runner ${who} hosts; this report prices jobs on it at $0 as your own pool, so if ${who} runs them, the billed cost here is understated`,
+  ];
 }
 
 /** Events whose payload carries `pull_request` and whose run can be a fork pull request's code. */
@@ -482,6 +487,7 @@ function paidRunners({ data, scale, workflows, jobRows, moveTo }) {
         `${why}; these jobs run on ${[...new Set(moves.map((m) => m.from))].join(', ')} and cost $${round(usd, 2)} in ${data.window.days} days`,
         ...moves.map((m) => `${m.id}: p50 ${minutesText(m.p50)}, p95 ${minutesText(m.p95)} over ${m.runs} runs, $${round(m.usd, 2)}`),
         'a short job gains little from a faster runner; a job that needs the provider\'s own cache or hardware should stay',
+        ...(moveTo ? hostedLooking(moveTo) : []),
         ...(exposed ? publicPool(moveTo, forks) : []),
       ],
       weekly: { runnerMinutes: 0, wallMinutes: 0, usd: round(usd * scale, 2) },
@@ -511,7 +517,7 @@ function publicPool(pool, forks) {
     forks
       ? `the runs-on expression sends ordinary pull requests from forks to ubuntu-latest, but it is not a wall: a fork pull request runs its own copy of the workflow and can name ${pool} itself`
       : `nothing in this workflow steers pull requests from forks, and any fork pull request can add a workflow of its own that names ${pool}`,
-    'if you still want this, set fork pull request workflows to need approval for all outside collaborators, and read every workflow change before you approve a run',
+    'if you still want this, choose "Require approval for all external contributors" (Settings, Actions, General), and read every workflow change before you approve a run',
   ];
 }
 

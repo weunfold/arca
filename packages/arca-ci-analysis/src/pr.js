@@ -300,7 +300,7 @@ function checkText(change) {
           change.forks
             ? `The runs-on expression sends ordinary pull requests from forks to ${change.forks}; open one from a fork to see it there. It is not a wall: a fork pull request runs its own copy of the workflow and can name ${change.pool} itself.`
             : `Nothing in this workflow steers pull requests from forks, and any fork pull request can add a workflow of its own that names ${change.pool}.`,
-          'If you still want this, set fork pull request workflows to need approval for all outside collaborators (Settings, Actions, General), and read every workflow change before you approve a run.',
+          'If you still want this, choose "Require approval for all external contributors" (Settings, Actions, General), and read every workflow change before you approve a run.',
         ].join('\n');
       }
       return `The moved jobs run on ${[...new Set(change.jobs.map((job) => job.to))].join(', ')} and pass as before; their time stays within the p95 above, since each is short. Nothing else changes runner.`;
