@@ -539,7 +539,9 @@ async fn the_verbs_start_a_connection_and_show_its_steps_and_the_log() {
     assert!(status["steps"].as_array().unwrap().len() >= 5);
     let listed = call("github_bindings", json!({})).await.unwrap().unwrap();
     assert_eq!(listed["bindings"][0]["mode"], "oauth");
-    let runner_name = listed["bindings"][0]["runners"][0]["name"].as_str().unwrap();
+    let runner_name = listed["bindings"][0]["runners"][0]["name"]
+        .as_str()
+        .unwrap();
     assert!(runner_name.len() > 5, "{runner_name}");
     let log = call("github_audit", json!({ "limit": 2 }))
         .await
