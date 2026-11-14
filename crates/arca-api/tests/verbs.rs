@@ -102,6 +102,7 @@ fn the_table_holds_the_initial_plan_alerts_postgres_and_ontology_verbs_in_order(
             "registry_secret_remove",
             "host_network_restore",
             "instance_move_preflight",
+            "os_update",
         ]
     );
     assert_eq!(API_VERSION, "0.1.0");
