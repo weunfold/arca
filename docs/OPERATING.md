@@ -5829,10 +5829,12 @@ and a default that rejects both ways:
 - **nothing else.** Without `internet`, a function's rules have no rule that lets everything else out: it can open no
   connection to a public address.
 
-**One way out stays open, and the card says so.** The service network's own DNS answers a function, as it answers
-every instance there, and it asks the internet's name servers for a name it does not know. So a program can still
-send a little data out in the names it looks up, to whoever runs the name server of a domain. The `Internet` row of
-the card says this in the owner's words. Closing it is not in this build.
+**Without `internet`, one way out stays open, and the card says so.** The service network's own DNS answers a
+function, as it answers every instance there, and it asks the internet's name servers for a name it does not know. So
+a program can still send a little data out in the names it looks up, to whoever runs the name server of a domain. The
+`Internet` row of the card says this in the owner's words. Closing it is not in this build. With `internet: true`
+the row says instead that the function can reach any public address and send there whatever its program and secrets
+hold, which covers this too.
 
 ### Secrets by name
 
