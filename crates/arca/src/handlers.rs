@@ -4043,6 +4043,10 @@ fn enrich_service_create(
         return Err(service_refused(why));
     }
     let mut payload = payload.clone();
+    // A virtual machine has no raw.lxc, so a stated one is never shown on its card.
+    if let Some(object) = payload.as_object_mut() {
+        object.remove("rawLxc");
+    }
     // A tenant's machine joins the managed service network and nothing else.
     if tenant.is_some() && payload.get("bridge").is_some() {
         return Err(service_refused(TENANT_BRIDGE));

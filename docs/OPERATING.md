@@ -986,12 +986,11 @@ was. `rawLxc` needs the same step on the node as `noNewPrivileges` (`restricted.
 service and a virtual-machine template are refused it the same way, and the record keeps the lines as `rawLxc`. The
 create's card has a `Low-level container settings (raw.lxc)` row with the container's `raw.lxc` lines whole (the
 proposal fills `rawLxc` in from the template; a call that states it must state exactly the template's), and so does a
-reconfigure's card when they change. On both cards, a line that loosens the container's isolation gets a row of its
-own in plain words, `This line loosens the container's isolation: <key>`: `lxc.apparmor.profile=unconfined`,
-`lxc.apparmor.allow_nesting` or `allow_incomplete` other than `0`, `lxc.no_new_privs=0`, `lxc.cap.drop`,
-`lxc.cap.keep`, `lxc.include`, `lxc.idmap`, `lxc.seccomp.profile`, `lxc.mount.entry`, `lxc.mount.auto`,
-`lxc.mount.fstab`, `lxc.cgroup.devices.allow`, `lxc.cgroup2.devices.allow` and every `lxc.hook.*`. Nothing is refused
-for it: the owner decides on the card. An existing service takes new lines with `service_reconfigure` (see "Reconfiguring a service from its
+reconfigure's card when they change. Incus applies `raw.lxc` last, so a line can replace what Incus set for the
+container (its root, its AppArmor profile, its namespaces and network, a mount, a hook, a limit). On both cards, every
+line therefore gets an `Isolation` row of its own, in plain words and naming the line, `This line may loosen the
+container's isolation: <line>`, except the few lines Arca knows are harmless: any `lxc.sched.core` line and
+`lxc.no_new_privs=1`. Nothing is refused for it: the owner decides on the card. An existing service takes new lines with `service_reconfigure` (see "Reconfiguring a service from its
 template").
 
 If the owner later sets `restricted.containers.lowlevel` back to `block`, Incus refuses every later write of the

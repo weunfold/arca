@@ -4190,7 +4190,7 @@ fn service_create_params_base() -> Value {
                 "type": "string"
             },
             "rawLxc": {
-                "description": "Filled in by the node when a create is proposed from a container template that sets noNewPrivileges or rawLxc: the container's raw.lxc lines, whole and in order, so the owner's card shows them (and says in words when a line loosens the container's isolation). A caller leaves it out; one that states it must state exactly the template's.",
+                "description": "Filled in by the node when a create is proposed from a container template that sets noNewPrivileges or rawLxc: the container's raw.lxc lines, whole and in order, so the owner's card shows them (and says in words when a line may loosen the container's isolation). A caller leaves it out; one that states it must state exactly the template's.",
                 "items": { "maxLength": 256, "type": "string" },
                 "maxItems": 17,
                 "type": "array"

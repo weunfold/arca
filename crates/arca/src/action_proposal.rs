@@ -512,7 +512,7 @@ impl ActionKind {
                     ));
                 }
                 // The container's `raw.lxc`, whole (filled in from the template when the proposal is made), and a
-                // plain-words row for each line that loosens its isolation.
+                // plain-words row for each line that may loosen its isolation.
                 if let Some(lines) = args.get("rawLxc") {
                     rows.push(row(RAW_LXC_LABEL, &list_words(lines)));
                     rows.extend(loosening_rows(lines));
@@ -1271,17 +1271,18 @@ fn reconfigure_count(changes: &Value) -> String {
 /// The label of the card row that shows a container's `raw.lxc` lines.
 pub const RAW_LXC_LABEL: &str = "Low-level container settings (raw.lxc)";
 
-/// One `Isolation` row for each `raw.lxc` line in `lines` that loosens the container's isolation, in plain words.
+/// One `Isolation` row, in plain words and naming the line, for each `raw.lxc` line in `lines` that may loosen the
+/// container's isolation: every line but the few Arca knows are harmless.
 fn loosening_rows(lines: &Value) -> Vec<ActionDetail> {
     lines
         .as_array()
         .into_iter()
         .flatten()
         .filter_map(Value::as_str)
-        .filter_map(crate::service::raw_lxc_loosens)
-        .map(|key| ActionDetail {
+        .filter(|line| crate::service::raw_lxc_may_loosen(line))
+        .map(|line| ActionDetail {
             label: "Isolation".to_string(),
-            value: format!("This line loosens the container's isolation: {key}"),
+            value: format!("This line may loosen the container's isolation: {line}"),
         })
         .collect()
 }

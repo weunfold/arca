@@ -482,7 +482,7 @@ fn a_template_that_adds_a_generated_secret_is_reconfigured_on_the_first_approval
 }
 
 #[test]
-fn a_raw_lxc_line_that_loosens_isolation_is_said_in_words_on_both_cards() {
+fn a_raw_lxc_line_that_may_loosen_isolation_is_said_in_words_on_both_cards() {
     let key = common::SkKey::from_seed(47);
     let rig = node(&key);
     let mut template = first_template();
@@ -500,7 +500,7 @@ fn a_raw_lxc_line_that_loosens_isolation_is_said_in_words_on_both_cards() {
     };
     assert_eq!(
         isolation(&proposed["details"]),
-        ["This line loosens the container's isolation: lxc.mount.entry"]
+        ["This line may loosen the container's isolation: lxc.mount.entry=/srv srv none bind 0 0"]
     );
 
     // A create from such a template shows raw.lxc whole, with the same words; one with sched.core alone says nothing
@@ -521,7 +521,7 @@ fn a_raw_lxc_line_that_loosens_isolation_is_said_in_words_on_both_cards() {
     );
     assert_eq!(
         isolation(&create["details"]),
-        ["This line loosens the container's isolation: lxc.mount.entry"]
+        ["This line may loosen the container's isolation: lxc.mount.entry=/srv srv none bind 0 0"]
     );
     strict["name"] = json!("calm");
     strict["rawLxc"] = json!(["lxc.sched.core=0"]);
@@ -537,17 +537,20 @@ fn a_raw_lxc_line_that_loosens_isolation_is_said_in_words_on_both_cards() {
         Some("lxc.no_new_privs=1, lxc.sched.core=0")
     );
     assert!(isolation(&calm["details"]).is_empty());
-    assert_eq!(
-        service::raw_lxc_loosens("lxc.apparmor.profile=unconfined").as_deref(),
-        Some("lxc.apparmor.profile")
-    );
-    assert_eq!(
-        service::raw_lxc_loosens("lxc.no_new_privs=0").as_deref(),
-        Some("lxc.no_new_privs")
-    );
-    assert_eq!(
-        service::raw_lxc_loosens("lxc.hook.mount=/bin/true").as_deref(),
-        Some("lxc.hook.mount")
-    );
-    assert!(service::raw_lxc_loosens("lxc.sched.core=0").is_none());
+    // Every line may loosen it but the few Arca knows are harmless: a namespace kept from the host, the host's
+    // network, another AppArmor profile, a host mount or a hook all get the row.
+    for line in [
+        "lxc.namespace.keep=net pid",
+        "lxc.net.0.type=none",
+        "lxc.apparmor.profile=unchanged",
+        "lxc.apparmor.profile=unconfined",
+        "lxc.rootfs.path=dir:/",
+        "lxc.cgroup2.memory.max=max",
+        "lxc.no_new_privs=0",
+        "lxc.hook.mount=/bin/true",
+    ] {
+        assert!(service::raw_lxc_may_loosen(line), "{line}");
+    }
+    assert!(!service::raw_lxc_may_loosen("lxc.sched.core=0"));
+    assert!(!service::raw_lxc_may_loosen("lxc.no_new_privs=1"));
 }

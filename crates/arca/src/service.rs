@@ -311,24 +311,18 @@ pub fn template_raw_lxc(template: &Template) -> Vec<String> {
     lines
 }
 
-/// The key of a `raw.lxc` line that loosens the container's isolation (a host mount, a device, a hook, an included
-/// file, capabilities, an AppArmor or seccomp profile, an id map, no-new-privileges turned off), so a card says it in
-/// plain words. `None` for any other line. Nothing is refused for it.
-pub fn raw_lxc_loosens(line: &str) -> Option<String> {
-    let (key, value) = line.split_once('=')?;
-    let (key, value) = (key.trim(), value.trim());
-    let loosens = match key {
-        "lxc.apparmor.profile" => value == "unconfined",
-        "lxc.apparmor.allow_nesting" | "lxc.apparmor.allow_incomplete" => value != "0",
-        "lxc.no_new_privs" => value == "0",
-        "lxc.cap.drop" | "lxc.cap.keep" | "lxc.include" | "lxc.idmap" | "lxc.seccomp.profile" => {
-            true
-        }
-        "lxc.mount.entry" | "lxc.mount.auto" | "lxc.mount.fstab" => true,
-        "lxc.cgroup.devices.allow" | "lxc.cgroup2.devices.allow" => true,
-        _ => key.starts_with("lxc.hook."),
+/// Whether a `raw.lxc` line may loosen the container's isolation, so a card says it in plain words. Every line may,
+/// except the few Arca knows are harmless (`lxc.sched.core`, `lxc.no_new_privs=1`): `raw.lxc` is applied last, so a
+/// line can replace what Incus set (the root, the AppArmor profile, the namespaces, the network, a limit). Nothing is
+/// refused for it; the owner decides on the card.
+pub fn raw_lxc_may_loosen(line: &str) -> bool {
+    let (key, value) = line.split_once('=').unwrap_or((line, ""));
+    let harmless = match key.trim() {
+        "lxc.sched.core" => true,
+        "lxc.no_new_privs" => value.trim() == "1",
+        _ => false,
     };
-    loosens.then(|| key.to_string())
+    !harmless
 }
 
 /// Whether `line` may be one of a template's `rawLxc` lines: `lxc.<key>=<value>` on one line, the key of lower-case

@@ -715,7 +715,7 @@ fn every_argument_of_every_allowed_verb_is_in_details() {
                 seen += 1;
                 continue;
             }
-            // The container's raw.lxc is shown whole, and a line that loosens its isolation says so in words.
+            // The container's raw.lxc is shown whole, and a line that may loosen its isolation says so in words.
             if field == "rawLxc" {
                 assert_eq!(
                     row.value,
@@ -728,7 +728,9 @@ fn every_argument_of_every_allowed_verb_is_in_details() {
                     .collect();
                 assert_eq!(
                     isolation,
-                    ["This line loosens the container's isolation: lxc.mount.entry"]
+                    [
+                        "This line may loosen the container's isolation: lxc.mount.entry=/srv srv none bind 0 0"
+                    ]
                 );
                 seen += 1 + isolation.len();
                 continue;

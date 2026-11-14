@@ -488,12 +488,22 @@ impl ServiceHandler {
         }
         let generated: BTreeSet<String> =
             first.generate.iter().map(|(key, _)| key.clone()).collect();
+        // By now the secrets made above are files on the node, so a refusal from here on says the service was not
+        // changed, and names those secrets, which stay for the next card.
+        let kept = if generated.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " The secrets Arca made for it ({}) are kept for the next card.",
+                generated.iter().cloned().collect::<Vec<_>>().join(", ")
+            )
+        };
         let made = plan(&self.cfg, entries, &config, &generated)?;
         if made.changes != first.changes || !made.generate.is_empty() {
             journal.step("end", false, json!({ "why": "the plan moved" }));
-            return Err(said(
-                "the service changed while it was reconfigured: propose it again",
-            ));
+            return Err(service_refused(format!(
+                "reconfigure service {name}: the service changed while it was reconfigured: propose it again. The service was not changed.{kept}"
+            )));
         }
         let applied = made.next.environment.clone();
         let mut next = made.next;
@@ -541,15 +551,17 @@ impl ServiceHandler {
                 stale = true;
             }
         });
-        if written.is_ok() && stale {
+        // A stale record was left as it is, so it is never put back, even when the node refused to save it: putting
+        // the old record back would undo the change made meanwhile.
+        if stale {
             journal.step(
                 "end",
                 false,
-                json!({ "why": "the record changed since the plan" }),
+                json!({ "why": "the record changed since the plan", "saved": written.is_ok() }),
             );
-            return Err(said(
-                "its record changed since the card was made (a link or a secret was set meanwhile): propose it again",
-            ));
+            return Err(service_refused(format!(
+                "reconfigure service {name}: its record changed since the card was made (a link or a secret was set meanwhile): propose it again. The service was not changed.{kept}"
+            )));
         }
         if let Err(error) = written {
             let why = match &error {
@@ -561,9 +573,12 @@ impl ServiceHandler {
             return Err(service_refused(format!(
                 "reconfigure service {name}: the change was not applied: {why}. {}",
                 if restored {
-                    "The service's record is as it was. Nothing was changed"
+                    format!(
+                        "The service's record is as it was, and the service was not changed.{kept}"
+                    )
                 } else {
                     "The service's record could not be put back: service_status shows what it says"
+                        .to_string()
                 }
             )));
         }
