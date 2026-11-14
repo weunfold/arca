@@ -196,7 +196,10 @@ test('--move-to takes one plain label of the owner\'s own pool, and a job on tha
   }
   for (const label of ['linux', 'linux-pool-4vcpu', 'ubuntu-latest', 'blacksmith-4vcpu-ubuntu-2404']) {
     const r = run({ sha: `h-${label}`, until: 5 });
-    const report = analyze(dataset([r], [{ ...job(r, { end: 5 }), labels: ['self-hosted', label] }]), { moveTo: label });
+    // The label alone, without `self-hosted`: only --move-to makes the job the owner's.
+    const data = dataset([r], [{ ...job(r, { end: 5 }), labels: [label] }]);
+    assert.ok(analyze(data).totals.listUsd > 0, `${label} without --move-to is priced as a hosted runner`);
+    const report = analyze(data, { moveTo: label });
     assert.equal(report.totals.listUsd, 0, label);
     assert.equal(report.jobs[0].runner, `self-hosted (${label})`, label);
   }
