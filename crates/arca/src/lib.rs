@@ -41,6 +41,7 @@ pub mod host_network;
 pub mod kernel;
 pub mod lifecycle;
 pub mod linked;
+pub mod move_preflight;
 pub mod omni;
 mod passkey_change;
 pub mod peer_sync;

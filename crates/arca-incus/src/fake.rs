@@ -2,7 +2,8 @@
 //! request it receives.
 //!
 //! GET routes: `/1.0`, `/1.0/projects?recursion=1`, `/1.0/instances?all-projects=true&recursion=1`,
-//! `/1.0/instances?all-projects=true&recursion=2`, `/1.0/storage-pools?recursion=1`, `/1.0/storage-pools/<pool>/resources`,
+//! `/1.0/instances?all-projects=true&recursion=2`, `/1.0/storage-pools?recursion=1`, `/1.0/storage-pools/<pool>` (its driver set by
+//! [`FakeIncus::set_pool_driver`]), `/1.0/storage-pools/<pool>/resources`,
 //! `/1.0/networks?recursion=1` and `/1.0/networks/<name>/state` (the host's interfaces, set by
 //! [`FakeIncus::set_host_interfaces`]), every object path, `/1.0/operations?all-projects=true&recursion=1`, and
 //! `/1.0/operations/<id>` with its `/wait`. Any other GET is 404.
@@ -234,6 +235,8 @@ struct Shared {
     counter: AtomicU64,
     /// The `/1.0/resources` document the fake serves, when a test sets one.
     resources: Mutex<Option<Value>>,
+    /// The driver each pool's own document names, by pool, set by [`FakeIncus::set_pool_driver`].
+    pool_drivers: Mutex<BTreeMap<String, String>>,
 }
 
 /// The served state: the server document, the pools, every object and every operation.
@@ -255,6 +258,8 @@ struct Store {
     /// The network cards a running instance reports in its live state, by project and name, set by
     /// [`FakeIncus::set_live_network`]: in place of the cards the fake makes from its devices and leases.
     live: BTreeMap<(String, String), Value>,
+    /// The root disk usage, in bytes, an instance reports in its state, by project and name.
+    disk_usage: BTreeMap<(String, String), u64>,
 }
 
 /// One DHCP lease: the network, the MAC that holds it and its address, and whether a device's `ipv4.address` pinned it.
@@ -323,6 +328,7 @@ enum Route {
     HostInterfaces,
     HostInterfaceState(String),
     PoolResources(String),
+    PoolObject(String),
     NetworkLeases(String),
     InstanceState(Address),
     InstanceRebuild(Address),
@@ -406,6 +412,7 @@ impl Shared {
             hung: BTreeMap::new(),
             usage: BTreeMap::new(),
             live: BTreeMap::new(),
+            disk_usage: BTreeMap::new(),
         };
         for index in 0..store.objects.len() {
             store.expand(index, false);
@@ -433,6 +440,7 @@ impl Shared {
             restores: Mutex::new(BTreeMap::new()),
             counter: AtomicU64::new(1),
             resources: Mutex::new(None),
+            pool_drivers: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -538,6 +546,28 @@ impl FakeIncus {
     /// Serves `document` at `/1.0/resources`. Until a test sets one, the fake answers 404, as an Incus without the endpoint.
     pub fn set_resources(&self, document: Value) {
         *lock(&self.shared.resources) = Some(document);
+    }
+
+    /// Names the driver of the pool `pool` in the pool's own document, `GET /1.0/storage-pools/<pool>`. A pool the state
+    /// holds answers `dir` until a test names another; a pool it does not hold answers 404. It records no write.
+    pub fn set_pool_driver(&self, pool: &str, driver: &str) {
+        lock(&self.shared.pool_drivers).insert(pool.to_string(), driver.to_string());
+    }
+
+    /// Puts a network ACL in `project`, as a create by hand would. It records no write.
+    pub fn add_acl(&self, project: &str, body: Value) {
+        let mut store = lock(&self.shared.store);
+        let name = text_of(&body, "name");
+        store.objects.retain(|object| {
+            !(object.kind == "acl" && object.project == project && object.name == name)
+        });
+        store.objects.push(Stored {
+            kind: "acl".to_string(),
+            project: project.to_string(),
+            name,
+            parent: String::new(),
+            body,
+        });
     }
 
     /// Sets the host's own interfaces: each name with the addresses it holds. The fake answers the listing of
@@ -760,6 +790,19 @@ impl FakeIncus {
             (project.to_string(), name.to_string()),
             (cpu_ns, memory_bytes),
         );
+    }
+
+    /// Sets the root disk usage, in bytes, the instance `name` in `project` reports in its `state` as `disk.root.usage`, as
+    /// Incus reads it from the storage driver. Panics when no such instance is held. It records no write.
+    pub fn set_root_disk_usage(&self, project: &str, name: &str, bytes: u64) {
+        let mut store = lock(&self.shared.store);
+        assert!(
+            store.instance_held(project, name),
+            "no instance {project}/{name} to set the disk usage of"
+        );
+        store
+            .disk_usage
+            .insert((project.to_string(), name.to_string()), bytes);
     }
 
     /// Sets the network cards the running instance `name` in `project` reports in its live state, as a guest's agent does:
@@ -1356,6 +1399,7 @@ fn parse(target: &str) -> Option<Route> {
         }
         ["images", fingerprint] => Route::Object(address("image", "", fingerprint)),
         ["storage-pools"] if query == "recursion=1" => Route::ListPools,
+        ["storage-pools", pool] if query.is_empty() => Route::PoolObject((*pool).to_string()),
         ["storage-pools", pool, "resources"] if query.is_empty() => {
             Route::PoolResources((*pool).to_string())
         }
@@ -1502,6 +1546,17 @@ fn dispatch(shared: &Shared, request: &Request, route: Route) -> (u16, String, V
             match store.pools.iter().find(|(name, _)| *name == pool) {
                 Some((_, resources)) => sync(resources.clone()),
                 None => (404, String::new(), error_envelope(404, "not found")),
+            }
+        }
+        ("GET", Route::PoolObject(pool)) => {
+            if store.pools.iter().any(|(name, _)| *name == pool) {
+                let driver = lock(&shared.pool_drivers)
+                    .get(&pool)
+                    .cloned()
+                    .unwrap_or_else(|| "dir".to_string());
+                sync(json!({ "name": pool, "driver": driver, "status": "Created", "config": {} }))
+            } else {
+                (404, String::new(), error_envelope(404, "not found"))
             }
         }
         ("GET", Route::ListOperations) => {
@@ -3311,13 +3366,20 @@ fn instance_state(store: &Store, address: &Address) -> Answer {
         .copied()
         .filter(|_| running)
         .unwrap_or((0, 0));
-    sync(json!({
+    let mut state = json!({
         "status": status,
         "status_code": if running { 103 } else { 102 },
         "network": network,
         "cpu": { "usage": cpu_ns },
         "memory": { "usage": memory },
-    }))
+    });
+    if let Some(bytes) = store
+        .disk_usage
+        .get(&(object.project.clone(), object.name.clone()))
+    {
+        state["disk"] = json!({ "root": { "usage": bytes } });
+    }
+    sync(state)
 }
 
 /// Rebuilds a stopped instance's root from an image, as an operation, and records which image the request named: the
