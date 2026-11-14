@@ -228,6 +228,7 @@ impl Pair {
             name: "beta".to_string(),
             socket: beta_socket.clone(),
             token_file: token_file.clone(),
+            incus_socket: None,
         }]);
         let alpha_tokens = alpha_scratch.path("alpha-tokens");
         private_dir(&alpha_tokens);
