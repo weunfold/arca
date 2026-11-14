@@ -903,7 +903,7 @@ static VERBS: [Verb; 70] = [
     },
     Verb {
         name: "function_create",
-        summary: "Create a function: an OCI image by digest that holds one program, run on a timer, each run one start of its own container, on its image's own root, with a time, a memory and a CPU limit. Only from a proposal the owner approved (action_propose), whose card shows the image and digest, the command, the timer, the limits, the names of its secrets and everything it may reach: the services of this node its links name, each on one tcp port, the private addresses this node's config names for it, and nothing else, no public address among them. It is created stopped; function_secret_set sets its secrets, and the timer runs it from then on.",
+        summary: "Create a function: an OCI image by digest that holds one program, run on a timer, each run one start of its own container, on its image's own root, with a time, a memory and a CPU limit. Only from a proposal the owner approved (action_propose), whose card shows the image and digest, the command, the timer, the limits, the names of its secrets and everything it may reach: the services of this node its links name, each on one tcp port, the private addresses this node's config names for it, and the internet only when the definition says internet: true. It is created stopped; function_secret_set sets its secrets, and the timer runs it from then on.",
         class: VerbClass::L,
         min_scope: Scope::Doctor,
         writes: true,
@@ -1435,6 +1435,10 @@ fn function_create_params_base() -> Value {
                 "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$", "type": "string" },
                 "type": "object"
             },
+            "internet": {
+                "description": "Whether the function may reach the internet: true lets its runs open connections to every public address, as a service can, and the owner's card says so. Left out or false, it opens no connection to a public address. The node's services stay closed to it but for its links either way.",
+                "type": "boolean"
+            },
             "image": {
                 "description": "The image, as <registry>/<repository> in lower case, such as registry.example/acme/relay. Arca pulls it without a credential.",
                 "maxLength": 255,
@@ -1489,6 +1493,7 @@ fn function_result() -> Value {
             ])),
         ),
         ("destinations", false, json!({ "type": "array" })),
+        ("internet", true, boolean()),
         ("triggers", true, json!({ "type": "array" })),
         ("limits", true, json!({ "type": "object" })),
         ("concurrency", true, bounded_int(1, 1)),

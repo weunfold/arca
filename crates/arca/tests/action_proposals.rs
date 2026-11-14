@@ -344,6 +344,7 @@ fn every_argument_of_every_allowed_verb_is_in_details() {
                 "links": [{ "to": "nats", "port": 4222 }],
                 "destinations": [{ "address": "10.20.30.40", "port": 443 }],
                 "registry": "https://registry.example",
+                "internet": true,
                 "triggers": [{ "timer": { "everySeconds": 30 } }],
                 "limits": { "seconds": 60, "memory": "128MiB", "cpu": 1 },
             }),
@@ -488,6 +489,10 @@ fn every_argument_of_every_allowed_verb_is_in_details() {
                     "secrets" => ("Secrets", "DATABASE_URL: each run is given these by name"),
                     "links" => ("Services on this node", "nats on tcp port 4222"),
                     "destinations" => ("Private network", "10.20.30.40 on tcp port 443"),
+                    "internet" => (
+                        "Internet",
+                        "Yes: it can open connections to any public address",
+                    ),
                     "triggers" => ("Runs", "every 30 seconds"),
                     "concurrency" => ("Runs", "one run at a time"),
                     "limits" => ("Limits", "at most 60 seconds, 128MiB of memory and 1 CPU"),
@@ -500,7 +505,6 @@ fn every_argument_of_every_allowed_verb_is_in_details() {
                 assert!(row(label).contains(holds), "{label}: {}", row(label));
             }
             assert_eq!(row("Command argument 1"), "--once");
-            assert!(row("Internet").starts_with("No:"));
             continue;
         }
         if action == ActionKind::ServiceUpdate {

@@ -5613,7 +5613,7 @@ A kernel-mode node with the managed service network (`kernel.serviceCidr`) runs 
 
 | Verb | Who runs it | What it does |
 |------|-------------|--------------|
-| `function_create {name, image, digest, triggers, command?, env?, secrets?, links?, limits?}` | only an approved action proposal | Creates the function, stopped. Its timer runs it from then on. |
+| `function_create {name, image, digest, triggers, command?, env?, secrets?, links?, internet?, limits?}` | only an approved action proposal | Creates the function, stopped. Its timer runs it from then on. |
 | `function_remove {name}` | only an approved action proposal | Stops the run that is going, deletes the function with its secrets. Its lines in the run log are kept. |
 | `function_secret_set {name, key, value}` | a `doctor` token | Sets one of the secrets the definition names. Write-only. |
 | `function_list` | a `viewer` token | Every function, with its definition, which secrets are set, whether a run is going, and its newest run. |
@@ -5649,6 +5649,7 @@ action_propose { "action": "function_create", "args": {
 | `env` | Plain values by name, at most 32, each at most 160 characters. The card shows each whole. |
 | `secrets` | Names only, at most 16. See below. |
 | `links` | Services of this node the function may reach, each on one tcp port that service declares. At most 8. |
+| `internet` | Optional, `true` or `false` (the default). `true` lets its runs open connections to every public address, as a service can; see below. |
 | `triggers` | Exactly one, a timer: `everySeconds` from 10 to 86400. |
 | `limits` | `seconds` 1 to 900 (default 60), `memory` a size of at least 8MiB (default 128MiB), `cpu` 1 to 64 (default 1). |
 
@@ -5669,8 +5670,13 @@ and a default that rejects both ways:
 - a **private address** outside the node's services is opened exactly as a service's is: the node's config names it for
   the function's name (`kernel.serviceDestinations`), the proposal fills it in, and the card's `Private network` row
   shows it ([A service that may reach one private address](#a-service-that-may-reach-one-private-address));
-- **nothing else.** A service's rules end with one that lets everything else out to the internet. A function's do not:
-  it can open no connection to a public address. There is no setting for it in this build.
+- the **internet**, only when the definition says `"internet": true`. The rules then end with one allow of every
+  address outside the service network. The rejects before it are a service's: every private range, the node's own
+  addresses, and every service of this node but the linked ones stay closed. The card's `Internet` row says `Yes` and
+  that a run can send there whatever its program and its secrets hold. It is for a program whose work is a public API
+  (the CI analysis reads `api.github.com`): its host names change their addresses, so no rule can name them one by one;
+- **nothing else.** Without `internet`, a function's rules have no rule that lets everything else out: it can open no
+  connection to a public address.
 
 **One way out stays open, and the card says so.** The service network's own DNS answers a function, as it answers
 every instance there, and it asks the internet's name servers for a name it does not know. So a program can still
