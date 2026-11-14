@@ -871,13 +871,15 @@ pub fn egress(cfg: &ServiceConfig, hosts: &Value) -> Vec<Value> {
         Some(Ok(block)) => Some(block),
         _ => None,
     };
-    // A function reaches only what its definition names: its linked services and its destinations, and no more.
+    // A function reaches only what its definition names: its linked services, its destinations, and the internet
+    // when the definition names it.
     if let Some(function) = &cfg.function {
         return arca_netproject::tenant::function_egress_rules(
             gateway,
             hosts,
             &cfg.destinations,
             &function.reach,
+            function.internet,
         );
     }
     arca_netproject::tenant::egress_rules(gateway, hosts, block, &cfg.destinations)
