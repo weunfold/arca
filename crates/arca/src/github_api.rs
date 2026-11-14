@@ -74,7 +74,8 @@ impl Endpoints {
 
 /// The DER prefix of a SHA-256 DigestInfo (RFC 8017, section 9.2, note 1).
 const SHA256_DIGEST_INFO: [u8; 19] = [
-    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20,
+    0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05,
+    0x00, 0x04, 0x20,
 ];
 
 /// The App's private key, parsed. It signs JWTs and nothing else, and it is never written back out.
@@ -119,7 +120,10 @@ impl AppKey {
             .key
             .sign_with_rng(&mut OsRandom, Pkcs1v15Sign::new_unprefixed(), &hashed)
             .map_err(|_| "the App key did not sign".to_string())?;
-        Ok(Secret(format!("{input}.{}", URL_SAFE_NO_PAD.encode(signature))))
+        Ok(Secret(format!(
+            "{input}.{}",
+            URL_SAFE_NO_PAD.encode(signature)
+        )))
     }
 }
 
@@ -176,7 +180,9 @@ impl RunnerKey {
         };
         let dp = key.dp().ok_or("a runner key has no dp")?;
         let dq = key.dq().ok_or("a runner key has no dq")?;
-        let inverse_q = key.crt_coefficient().ok_or("a runner key has no inverse q")?;
+        let inverse_q = key
+            .crt_coefficient()
+            .ok_or("a runner key has no inverse q")?;
         let padded = |bytes: Vec<u8>, len: usize| {
             let mut out = vec![0u8; len.saturating_sub(bytes.len())];
             out.extend_from_slice(&bytes);
@@ -414,7 +420,8 @@ mod tests {
 
     #[test]
     fn a_pem_body_is_read_with_either_line_ending() {
-        let pem = "-----BEGIN RSA PRIVATE KEY-----\r\nAAEC\r\nAwQ=\r\n-----END RSA PRIVATE KEY-----\r\n";
+        let pem =
+            "-----BEGIN RSA PRIVATE KEY-----\r\nAAEC\r\nAwQ=\r\n-----END RSA PRIVATE KEY-----\r\n";
         let (label, der) = pem_body(pem).expect("a block");
         assert_eq!(label, "RSA PRIVATE KEY");
         assert_eq!(der, vec![0, 1, 2, 3, 4]);

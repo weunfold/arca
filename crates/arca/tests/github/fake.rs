@@ -32,7 +32,16 @@ pub const INSTALL_TOKEN: &str = "fake-install-token-0123";
 /// Every just-in-time configuration the fake mints starts with this.
 pub const JIT: &str = "fake-jit-config-";
 /// Every credential the fake hands out or takes: none may appear in anything the signer shows or logs.
-pub const SECRETS: [&str; 8] = [CLIENT_SECRET, DEVICE_CODE, GRANT, REGISTRATION, ADMIN, "BEGIN RSA", INSTALL_TOKEN, JIT];
+pub const SECRETS: [&str; 8] = [
+    CLIENT_SECRET,
+    DEVICE_CODE,
+    GRANT,
+    REGISTRATION,
+    ADMIN,
+    "BEGIN RSA",
+    INSTALL_TOKEN,
+    JIT,
+];
 
 #[derive(Debug, Clone)]
 pub struct Seen {
@@ -107,7 +116,10 @@ impl Fake {
                 .chunks(64)
                 .map(|chunk| std::str::from_utf8(chunk).expect("base64 is ASCII"))
                 .collect();
-            format!("-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----\n", lines.join("\n"))
+            format!(
+                "-----BEGIN RSA PRIVATE KEY-----\n{}\n-----END RSA PRIVATE KEY-----\n",
+                lines.join("\n")
+            )
         };
         let state = Arc::new(Mutex::new(FakeState {
             org: org.to_string(),
@@ -138,9 +150,7 @@ impl Fake {
             scale_sets: Vec::new(),
             poll_script: Vec::new(),
         }));
-        let router = Router::new()
-            .fallback(serve)
-            .with_state(Arc::clone(&state));
+        let router = Router::new().fallback(serve).with_state(Arc::clone(&state));
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
@@ -229,9 +239,12 @@ fn app_jwt_ok(s: &FakeState, auth: &str) -> bool {
     }
     // SHA-256's DigestInfo prefix, then the digest: what PKCS#1 v1.5 signs.
     let mut hashed = vec![
-        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01, 0x05, 0x00, 0x04, 0x20,
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20,
     ];
-    hashed.extend_from_slice(&sha2::Sha256::digest(format!("{header}.{payload}").as_bytes()));
+    hashed.extend_from_slice(&sha2::Sha256::digest(
+        format!("{header}.{payload}").as_bytes(),
+    ));
     rsa::RsaPublicKey::from(&s.app_key)
         .verify(rsa::Pkcs1v15Sign::new_unprefixed(), &hashed, &signature)
         .is_ok()
@@ -269,7 +282,9 @@ async fn serve(State(state): State<Arc<Mutex<FakeState>>>, request: Request) -> 
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let body: Bytes = to_bytes(request.into_body(), 1 << 20).await.unwrap_or_default();
+    let body: Bytes = to_bytes(request.into_body(), 1 << 20)
+        .await
+        .unwrap_or_default();
     let body: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     let mut state = state.lock().expect("the fake's lock");
     state.seen.push(Seen {
@@ -304,7 +319,10 @@ fn answer(
 ) -> (u16, Value) {
     let org = s.org.clone();
     let grant_ok = (auth == format!("bearer:{GRANT}") && !s.grant_deleted && s.authorized)
-        || (auth == format!("bearer:{INSTALL_TOKEN}") && s.installed && !s.suspended && !s.app_deleted);
+        || (auth == format!("bearer:{INSTALL_TOKEN}")
+            && s.installed
+            && !s.suspended
+            && !s.app_deleted);
     let installation_path = format!("/api/app/installations/{INSTALLATION}");
     match (method, path) {
         ("POST", p) if p == format!("/api/app-manifests/{MANIFEST_CODE}/conversions") => {
@@ -330,7 +348,10 @@ fn answer(
             if s.app_deleted || !app_jwt_ok(s, auth) {
                 return (401, message("A JSON web token could not be decoded"));
             }
-            (200, json!({ "id": APP_ID, "slug": APP_SLUG, "client_id": APP_CLIENT_ID }))
+            (
+                200,
+                json!({ "id": APP_ID, "slug": APP_SLUG, "client_id": APP_CLIENT_ID }),
+            )
         }
         ("GET", p) if p == installation_path => {
             if s.app_deleted || !app_jwt_ok(s, auth) {
@@ -383,9 +404,15 @@ fn answer(
                 .iter()
                 .map(|(id, name)| json!({ "id": id, "full_name": name }))
                 .collect();
-            (200, json!({ "total_count": repositories.len(), "repositories": repositories }))
+            (
+                200,
+                json!({ "total_count": repositories.len(), "repositories": repositories }),
+            )
         }
-        ("PUT", p) if p.starts_with(&format!("/api/orgs/{org}/actions/runner-groups/")) && p.ends_with("/repositories") => {
+        ("PUT", p)
+            if p.starts_with(&format!("/api/orgs/{org}/actions/runner-groups/"))
+                && p.ends_with("/repositories") =>
+        {
             if !grant_ok {
                 return (401, message("Bad credentials"));
             }
@@ -395,7 +422,8 @@ fn answer(
                 .parse()
                 .unwrap_or(0);
             s.group_repositories.retain(|(group, _)| *group != id);
-            s.group_repositories.push((id, body["selected_repository_ids"].clone()));
+            s.group_repositories
+                .push((id, body["selected_repository_ids"].clone()));
             (204, Value::Null)
         }
         ("PATCH", p) if p.starts_with(&format!("/api/orgs/{org}/actions/runner-groups/")) => {
@@ -430,7 +458,10 @@ fn answer(
             if auth != format!("bearer:{ADMIN}") || !query.contains("api-version=") {
                 return (401, message("Bad credentials"));
             }
-            let id: u64 = p.trim_start_matches("/tenant/_apis/runtime/runnerscalesets/").parse().unwrap_or(0);
+            let id: u64 = p
+                .trim_start_matches("/tenant/_apis/runtime/runnerscalesets/")
+                .parse()
+                .unwrap_or(0);
             match s.scale_sets.iter().find(|(scale_set, _)| *scale_set == id) {
                 Some((id, group)) => (
                     200,
@@ -439,7 +470,10 @@ fn answer(
                 None => (404, message("Not Found")),
             }
         }
-        ("POST", p) if p.starts_with("/tenant/_apis/runtime/runnerscalesets/") && p.ends_with("/generatejitconfig") => {
+        ("POST", p)
+            if p.starts_with("/tenant/_apis/runtime/runnerscalesets/")
+                && p.ends_with("/generatejitconfig") =>
+        {
             if auth != format!("bearer:{ADMIN}") || !query.contains("api-version=") {
                 return (401, message("Bad credentials"));
             }
@@ -552,7 +586,10 @@ fn answer(
                 return (401, message("Bad credentials"));
             }
             if let Some(status) = s.group_create_refusal {
-                return (status, message("Runner groups are not available on this plan"));
+                return (
+                    status,
+                    message("Runner groups are not available on this plan"),
+                );
             }
             if s.groups.iter().any(|group| group["name"] == body["name"]) {
                 return (409, message("A runner group with this name already exists"));
@@ -573,7 +610,8 @@ fn answer(
             if auth != format!("remote:{REGISTRATION}") {
                 return (404, message("Not Found"));
             }
-            if body["url"] != format!("{}/web/{org}", s.base) || body["runner_event"] != "register" {
+            if body["url"] != format!("{}/web/{org}", s.base) || body["runner_event"] != "register"
+            {
                 return (400, message("bad url"));
             }
             (
@@ -591,7 +629,10 @@ fn answer(
                 return (401, message("Bad credentials"));
             }
             let name = body["name"].as_str().unwrap_or_default().to_string();
-            if s.refuse_name.as_deref().is_some_and(|start| name.starts_with(start)) {
+            if s.refuse_name
+                .as_deref()
+                .is_some_and(|start| name.starts_with(start))
+            {
                 return (409, message("A runner exists with the same name"));
             }
             let key = body["public_key"].as_str().unwrap_or_default();
@@ -638,11 +679,15 @@ fn answer(
                         "isInternal": group["default"],
                     })
                 })
-                .chain(std::iter::once(json!({ "id": 2, "name": "GitHub Actions", "isHosted": true })))
+                .chain(std::iter::once(
+                    json!({ "id": 2, "name": "GitHub Actions", "isHosted": true }),
+                ))
                 .collect();
             (200, json!({ "count": pools.len(), "value": pools }))
         }
-        ("POST", p) if p.starts_with("/tenant/_apis/distributedtask/pools/") && p.ends_with("/agents") => {
+        ("POST", p)
+            if p.starts_with("/tenant/_apis/distributedtask/pools/") && p.ends_with("/agents") =>
+        {
             if auth != format!("bearer:{ADMIN}") {
                 return (401, message("Bad credentials"));
             }

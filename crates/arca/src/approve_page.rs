@@ -615,7 +615,11 @@ fn github_caller(credential: &str) -> String {
     format!("page:{}", credential.chars().take(24).collect::<String>())
 }
 
-fn github_ctx<'a>(state: &'a PageState, signer: &'a crate::github_signer::Signer, caller: &'a str) -> crate::github_page::Ctx<'a> {
+fn github_ctx<'a>(
+    state: &'a PageState,
+    signer: &'a crate::github_signer::Signer,
+    caller: &'a str,
+) -> crate::github_page::Ctx<'a> {
     crate::github_page::Ctx {
         signer,
         origin: &state.origin,
@@ -657,7 +661,10 @@ fn github_form(
 ) -> Option<(String, HashMap<String, String>)> {
     let credential = state.canvas.session(headers, (state.clock)())?;
     let text = String::from_utf8_lossy(body);
-    Some((github_caller(&credential), crate::github_page::parse_form(&text)))
+    Some((
+        github_caller(&credential),
+        crate::github_page::parse_form(&text),
+    ))
 }
 
 /// The answer to a GitHub page POST that came without a passkey session.
@@ -669,42 +676,66 @@ fn github_signed_out() -> Response {
         .into_response()
 }
 
-async fn github_device(State(state): State<Arc<PageState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn github_device(
+    State(state): State<Arc<PageState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let Some(signer) = &state.github else {
         return StatusCode::NOT_FOUND.into_response();
     };
     match github_form(&state, &headers, &body) {
-        Some((caller, form)) => crate::github_page::device(&github_ctx(&state, signer, &caller), &form).await,
+        Some((caller, form)) => {
+            crate::github_page::device(&github_ctx(&state, signer, &caller), &form).await
+        }
         None => github_signed_out(),
     }
 }
 
-async fn github_app(State(state): State<Arc<PageState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn github_app(
+    State(state): State<Arc<PageState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let Some(signer) = &state.github else {
         return StatusCode::NOT_FOUND.into_response();
     };
     match github_form(&state, &headers, &body) {
-        Some((caller, form)) => crate::github_page::app_start(&github_ctx(&state, signer, &caller), &form),
+        Some((caller, form)) => {
+            crate::github_page::app_start(&github_ctx(&state, signer, &caller), &form)
+        }
         None => github_signed_out(),
     }
 }
 
-async fn github_push(State(state): State<Arc<PageState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn github_push(
+    State(state): State<Arc<PageState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let Some(signer) = &state.github else {
         return StatusCode::NOT_FOUND.into_response();
     };
     match github_form(&state, &headers, &body) {
-        Some((caller, form)) => crate::github_page::push(&github_ctx(&state, signer, &caller), &form),
+        Some((caller, form)) => {
+            crate::github_page::push(&github_ctx(&state, signer, &caller), &form)
+        }
         None => github_signed_out(),
     }
 }
 
-async fn github_disconnect(State(state): State<Arc<PageState>>, headers: HeaderMap, body: Bytes) -> Response {
+async fn github_disconnect(
+    State(state): State<Arc<PageState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     let Some(signer) = &state.github else {
         return StatusCode::NOT_FOUND.into_response();
     };
     match github_form(&state, &headers, &body) {
-        Some((caller, form)) => crate::github_page::disconnect(&github_ctx(&state, signer, &caller), &form).await,
+        Some((caller, form)) => {
+            crate::github_page::disconnect(&github_ctx(&state, signer, &caller), &form).await
+        }
         None => github_signed_out(),
     }
 }

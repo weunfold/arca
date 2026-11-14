@@ -1192,7 +1192,11 @@ fn summary_github_disconnect(v: &Value) -> String {
 
 fn github_job_schema() -> Value {
     params(vec![
-        ("repo", true, json!({ "description": "owner/name", "maxLength": 200, "minLength": 3, "type": "string" })),
+        (
+            "repo",
+            true,
+            json!({ "description": "owner/name", "maxLength": 200, "minLength": 3, "type": "string" }),
+        ),
         ("runId", false, at_least(0)),
         ("jobId", false, at_least(0)),
         ("jobName", false, string_max(300)),
@@ -1209,7 +1213,11 @@ fn github_runner_mint_params() -> Value {
             json!({ "description": "The runner's name on GitHub.", "maxLength": 64, "minLength": 1, "pattern": "^[A-Za-z0-9._-]+$", "type": "string" }),
         ),
         ("labels", true, github_labels_schema()),
-        ("workFolder", false, json!({ "description": "The runner's work folder; _work when absent.", "maxLength": 200, "minLength": 1, "type": "string" })),
+        (
+            "workFolder",
+            false,
+            json!({ "description": "The runner's work folder; _work when absent.", "maxLength": 200, "minLength": 1, "type": "string" }),
+        ),
         ("scaleSetId", false, at_least(1)),
         ("job", false, github_job_schema()),
     ])
@@ -1227,7 +1235,10 @@ fn github_runner_mint_result() -> Value {
 }
 
 fn github_mint_job_params() -> Value {
-    params(vec![("mintId", true, at_least(1)), ("job", true, github_job_schema())])
+    params(vec![
+        ("mintId", true, at_least(1)),
+        ("job", true, github_job_schema()),
+    ])
 }
 
 fn github_mint_job_result() -> Value {
@@ -1239,7 +1250,10 @@ fn github_disconnect_params() -> Value {
 }
 
 fn summary_github_oauth_app_set(v: &Value) -> String {
-    format!("GitHub OAuth App {} set", v["clientId"].as_str().unwrap_or("?"))
+    format!(
+        "GitHub OAuth App {} set",
+        v["clientId"].as_str().unwrap_or("?")
+    )
 }
 
 fn summary_github_connect(v: &Value) -> String {
@@ -1261,7 +1275,10 @@ fn summary_github_bindings(v: &Value) -> String {
 }
 
 fn summary_github_audit(v: &Value) -> String {
-    format!("{} audit line(s)", v["lines"].as_array().map_or(0, Vec::len))
+    format!(
+        "{} audit line(s)",
+        v["lines"].as_array().map_or(0, Vec::len)
+    )
 }
 
 /// A GitHub organisation login.
@@ -1452,7 +1469,9 @@ fn github_audit_result() -> Value {
     result(vec![(
         "lines",
         true,
-        array(json!({ "type": "object", "properties": { "at": { "type": "integer" }, "atText": { "type": "string" }, "kind": { "type": "string" } }, "required": ["at", "atText", "kind"] })),
+        array(
+            json!({ "type": "object", "properties": { "at": { "type": "integer" }, "atText": { "type": "string" }, "kind": { "type": "string" } }, "required": ["at", "atText", "kind"] }),
+        ),
     )])
 }
 
@@ -2533,7 +2552,10 @@ fn not_confirmed(name: &str) -> String {
         "github_disconnect" => "nothing was disconnected",
         _ => "nothing was deleted",
     };
-    let spent = if matches!(name, "postgres_delete" | "deploy_rollback" | "github_disconnect") {
+    let spent = if matches!(
+        name,
+        "postgres_delete" | "deploy_rollback" | "github_disconnect"
+    ) {
         ""
     } else {
         " and no approval was spent"

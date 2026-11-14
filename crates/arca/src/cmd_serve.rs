@@ -643,7 +643,12 @@ pub fn serve(flags: &Flags) -> Result<Option<Value>, Failure> {
             crate::github_api::Endpoints::github(),
             clock.clone(),
         )
-        .map_err(|e| Failure::Runtime(format!("the GitHub signer cannot be opened: {}", e.message())))?;
+        .map_err(|e| {
+            Failure::Runtime(format!(
+                "the GitHub signer cannot be opened: {}",
+                e.message()
+            ))
+        })?;
         for (verb, handler) in crate::github_handlers::handlers(&signer) {
             server = server.handle(verb, handler);
         }

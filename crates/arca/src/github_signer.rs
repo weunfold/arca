@@ -249,8 +249,9 @@ impl Signer {
         let mut bindings = BTreeMap::new();
         let folder = dir.join("bindings");
         if folder.is_dir() {
-            let entries = fs::read_dir(&folder)
-                .map_err(|_| SignerError::Store("the GitHub connections cannot be read".to_string()))?;
+            let entries = fs::read_dir(&folder).map_err(|_| {
+                SignerError::Store("the GitHub connections cannot be read".to_string())
+            })?;
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
@@ -330,7 +331,10 @@ impl Signer {
     pub fn runner_files(&self, binding: &str, runner: &str) -> Result<RunnerFiles, SignerError> {
         {
             let state = self.lock();
-            let record = state.bindings.get(binding).ok_or(SignerError::UnknownBinding)?;
+            let record = state
+                .bindings
+                .get(binding)
+                .ok_or(SignerError::UnknownBinding)?;
             if !record.runners.iter().any(|known| known.name == runner) {
                 return Err(SignerError::UnknownRunner);
             }
@@ -367,13 +371,20 @@ impl Signer {
 
     /// Sets the node's OAuth App: its client ID, in its own file, and its secret, in another. The secret is never read
     /// back by a verb.
-    pub fn set_oauth_app(&self, client_id: &str, client_secret: &Secret) -> Result<(), SignerError> {
+    pub fn set_oauth_app(
+        &self,
+        client_id: &str,
+        client_secret: &Secret,
+    ) -> Result<(), SignerError> {
         if client_id.is_empty()
             || client_id.len() > 64
-            || !client_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
+            || !client_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_')
         {
             return Err(SignerError::Invalid(
-                "clientId: a GitHub OAuth App's client ID is letters, digits, dots and underscores".to_string(),
+                "clientId: a GitHub OAuth App's client ID is letters, digits, dots and underscores"
+                    .to_string(),
             ));
         }
         if client_secret.expose().is_empty() || client_secret.expose().len() > 256 {
@@ -461,7 +472,10 @@ pub(crate) fn fresh_id(prefix: &str) -> Result<String, SignerError> {
         .map_err(|_| SignerError::Store("no random number for an id".to_string()))?;
     Ok(format!(
         "{prefix}{}",
-        bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
     ))
 }
 
@@ -472,7 +486,12 @@ pub(crate) fn private_dir(dir: &Path) -> Result<(), SignerError> {
         .mode(0o700)
         .create(dir)
         .and_then(|()| fs::set_permissions(dir, fs::Permissions::from_mode(0o700)))
-        .map_err(|_| SignerError::Store(format!("the folder {} cannot be made private", dir.display())))
+        .map_err(|_| {
+            SignerError::Store(format!(
+                "the folder {} cannot be made private",
+                dir.display()
+            ))
+        })
 }
 
 /// Writes `bytes` to `path` through a 0600 file beside it and a rename, making the parent folder (0700) first.
@@ -507,21 +526,30 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<(), SignerError
 /// same. The person chooses the names: none is added and none is required.
 pub fn check_labels(path: &str, labels: &[String]) -> Result<Vec<String>, SignerError> {
     if labels.is_empty() || labels.len() > 20 {
-        return Err(SignerError::Invalid(format!("{path}: one to twenty labels")));
+        return Err(SignerError::Invalid(format!(
+            "{path}: one to twenty labels"
+        )));
     }
     let mut seen = Vec::new();
     for label in labels {
         let label = label.trim();
         if label.is_empty()
             || label.chars().count() > 100
-            || label.chars().any(|c| c.is_control() || c.is_whitespace() || c == ',')
+            || label
+                .chars()
+                .any(|c| c.is_control() || c.is_whitespace() || c == ',')
         {
             return Err(SignerError::Invalid(format!(
                 "{path}: a label is 1 to 100 characters with no space or comma"
             )));
         }
-        if seen.iter().any(|known: &String| known.eq_ignore_ascii_case(label)) {
-            return Err(SignerError::Invalid(format!("{path}: a label is named twice")));
+        if seen
+            .iter()
+            .any(|known: &String| known.eq_ignore_ascii_case(label))
+        {
+            return Err(SignerError::Invalid(format!(
+                "{path}: a label is named twice"
+            )));
         }
         seen.push(label.to_string());
     }
@@ -532,7 +560,9 @@ pub fn check_labels(path: &str, labels: &[String]) -> Result<Vec<String>, Signer
 pub fn check_account(account: &str) -> Result<(), SignerError> {
     let ok = !account.is_empty()
         && account.len() <= 39
-        && account.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && account
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
         && !account.starts_with('-')
         && !account.ends_with('-')
         && !account.contains("--");
@@ -540,7 +570,8 @@ pub fn check_account(account: &str) -> Result<(), SignerError> {
         Ok(())
     } else {
         Err(SignerError::Invalid(
-            "org: a GitHub organisation's login is 1 to 39 letters, digits and single hyphens".to_string(),
+            "org: a GitHub organisation's login is 1 to 39 letters, digits and single hyphens"
+                .to_string(),
         ))
     }
 }
@@ -548,8 +579,7 @@ pub fn check_account(account: &str) -> Result<(), SignerError> {
 /// Whether two label sets are the same labels, in any order, letter case aside (GitHub matches labels so).
 pub fn same_labels(a: &[String], b: &[String]) -> bool {
     a.len() == b.len()
-        && a
-            .iter()
+        && a.iter()
             .all(|label| b.iter().any(|other| other.eq_ignore_ascii_case(label)))
 }
 
@@ -569,7 +599,10 @@ mod tests {
             &["Linux".to_string(), "x64".to_string()],
             &["x64".to_string(), "linux".to_string()]
         ));
-        assert!(!same_labels(&["linux".to_string()], &["linux".to_string(), "x64".to_string()]));
+        assert!(!same_labels(
+            &["linux".to_string()],
+            &["linux".to_string(), "x64".to_string()]
+        ));
     }
 
     #[test]

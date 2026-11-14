@@ -173,7 +173,10 @@ pub fn view(ctx: &Ctx<'_>, query: &HashMap<String, String>) -> Response {
     );
     let mut refresh = false;
     if let Some(flow) = query.get("flow").and_then(|id| signer.oauth_flow(id)) {
-        refresh = matches!(flow.state, FlowState::WaitingForPerson | FlowState::Registering);
+        refresh = matches!(
+            flow.state,
+            FlowState::WaitingForPerson | FlowState::Registering
+        );
         body.push_str("<section>");
         match flow.state {
             FlowState::WaitingForPerson => body.push_str(&format!(
@@ -239,7 +242,11 @@ pub fn view(ctx: &Ctx<'_>, query: &HashMap<String, String>) -> Response {
             body.push_str(&format!("; {} runner(s)", binding.runners.len()));
         }
         body.push_str(".</p>");
-        if let Some(warning) = binding.runner_group.as_ref().and_then(|group| group.warning.as_ref()) {
+        if let Some(warning) = binding
+            .runner_group
+            .as_ref()
+            .and_then(|group| group.warning.as_ref())
+        {
             body.push_str(&format!("<p class=\"bad\">{}</p>", escape(warning)));
         }
         if let Some(why) = &binding.why {
@@ -341,7 +348,9 @@ pub fn app_start(ctx: &Ctx<'_>, form: &HashMap<String, String>) -> Response {
         .app_begin(field(form, "org"), &sets, ctx.origin, ctx.caller)
     {
         Ok(start) => start,
-        Err(error) => return message_page(StatusCode::BAD_REQUEST, "Not started", &error.message()),
+        Err(error) => {
+            return message_page(StatusCode::BAD_REQUEST, "Not started", &error.message());
+        }
     };
     let body = format!(
         "<h1>Create the App on GitHub</h1><section><p>GitHub will show an App named for Arca, owned by {org}, asking \
@@ -356,11 +365,13 @@ pub fn app_start(ctx: &Ctx<'_>, form: &HashMap<String, String>) -> Response {
     );
     let mut response = html(&body, false);
     let web = web_origin(&ctx.signer.endpoints().web);
-    let csp = crate::canvas::csp().replace("form-action 'self'", &format!("form-action 'self' {web}"));
+    let csp =
+        crate::canvas::csp().replace("form-action 'self'", &format!("form-action 'self' {web}"));
     if let Ok(value) = HeaderValue::from_str(&csp) {
-        response
-            .headers_mut()
-            .insert(header::HeaderName::from_static("content-security-policy"), value);
+        response.headers_mut().insert(
+            header::HeaderName::from_static("content-security-policy"),
+            value,
+        );
     }
     response
 }
@@ -402,7 +413,10 @@ pub async fn installed(ctx: &Ctx<'_>, query: &HashMap<String, String>) -> Respon
 /// `POST /approve/github/push`: makes a push binding and shows its address and token once.
 pub fn push(ctx: &Ctx<'_>, form: &HashMap<String, String>) -> Response {
     let sets = label_sets(field(form, "labels"));
-    match ctx.signer.push_create(field(form, "org"), &sets, ctx.caller) {
+    match ctx
+        .signer
+        .push_create(field(form, "org"), &sets, ctx.caller)
+    {
         Ok((binding, token)) => {
             let address = format!("{}/github/intake/{}", ctx.origin, binding.id);
             let body = format!(
@@ -428,7 +442,11 @@ pub fn push(ctx: &Ctx<'_>, form: &HashMap<String, String>) -> Response {
 pub async fn disconnect(ctx: &Ctx<'_>, form: &HashMap<String, String>) -> Response {
     match ctx.signer.revoke(field(form, "binding"), ctx.caller).await {
         Ok(_) => see_other(PAGE_PATH),
-        Err(error) => message_page(StatusCode::BAD_REQUEST, "Not disconnected", &error.message()),
+        Err(error) => message_page(
+            StatusCode::BAD_REQUEST,
+            "Not disconnected",
+            &error.message(),
+        ),
     }
 }
 
@@ -447,21 +465,35 @@ async fn intake(
 ) -> Response {
     let answer = |status: StatusCode, body: Value| (status, axum::Json(body)).into_response();
     if headers.contains_key(header::ORIGIN) {
-        return answer(StatusCode::FORBIDDEN, json!({ "error": "not from a browser" }));
+        return answer(
+            StatusCode::FORBIDDEN,
+            json!({ "error": "not from a browser" }),
+        );
     }
     let Some(token) = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
     else {
-        return answer(StatusCode::UNAUTHORIZED, json!({ "error": "a bearer token is required" }));
+        return answer(
+            StatusCode::UNAUTHORIZED,
+            json!({ "error": "a bearer token is required" }),
+        );
     };
     let body: Bytes = match to_bytes(request.into_body(), 128 * 1024).await {
         Ok(body) => body,
-        Err(_) => return answer(StatusCode::PAYLOAD_TOO_LARGE, json!({ "error": "at most 128 KiB" })),
+        Err(_) => {
+            return answer(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                json!({ "error": "at most 128 KiB" }),
+            );
+        }
     };
     let Ok(body) = serde_json::from_slice::<Value>(&body) else {
-        return answer(StatusCode::BAD_REQUEST, json!({ "error": "the body is JSON" }));
+        return answer(
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "the body is JSON" }),
+        );
     };
     match signer.intake(&binding, token.trim(), &body) {
         Ok(queued) => answer(StatusCode::ACCEPTED, json!({ "queued": queued })),
@@ -489,7 +521,10 @@ mod tests {
                 vec!["big".to_string()]
             ]
         );
-        assert_eq!(escape("<a href=\"x\">'"), "&lt;a href=&quot;x&quot;&gt;&#39;");
+        assert_eq!(
+            escape("<a href=\"x\">'"),
+            "&lt;a href=&quot;x&quot;&gt;&#39;"
+        );
         assert_eq!(web_origin("https://github.com"), "https://github.com");
         assert_eq!(web_origin("http://127.0.0.1:9/web"), "http://127.0.0.1:9");
     }

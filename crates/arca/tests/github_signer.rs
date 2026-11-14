@@ -23,8 +23,8 @@ use serde_json::{Value, json};
 
 use arca::github_app::{JobRef, MintRefused, MintRequest, RUNNER_GROUP_NAME};
 use fake::{
-    APP_CLIENT_ID, APP_SLUG, CLIENT_ID, CLIENT_SECRET, Fake, GRANT, INSTALLATION, JIT, MANIFEST_CODE, OWNER_ID,
-    SECRETS, USER_CODE,
+    APP_CLIENT_ID, APP_SLUG, CLIENT_ID, CLIENT_SECRET, Fake, GRANT, INSTALLATION, JIT,
+    MANIFEST_CODE, OWNER_ID, SECRETS, USER_CODE,
 };
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -93,7 +93,10 @@ async fn settled(signer: &Signer, id: &str) -> OauthFlow {
         if matches!(flow.state, FlowState::Done | FlowState::Failed) {
             return flow;
         }
-        assert!(Instant::now() < deadline, "the flow did not settle: {flow:?}");
+        assert!(
+            Instant::now() < deadline,
+            "the flow did not settle: {flow:?}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -107,7 +110,10 @@ fn shown_files(dir: &Path) -> Vec<(PathBuf, String)> {
             let path = entry.path();
             if path.is_dir() {
                 // The private store's credential folders: runners' files, App keys and pushed configurations.
-                if !matches!(path.file_name().and_then(|n| n.to_str()), Some("runners" | "keys" | "intake")) {
+                if !matches!(
+                    path.file_name().and_then(|n| n.to_str()),
+                    Some("runners" | "keys" | "intake")
+                ) {
                     stack.push(path);
                 }
             } else if path.file_name().and_then(|n| n.to_str()) != Some("oauth-app.secret") {
@@ -125,7 +131,11 @@ fn assert_no_secret(what: &str, text: &str) {
 }
 
 fn mode_of(path: &Path) -> u32 {
-    fs::metadata(path).expect("the file exists").permissions().mode() & 0o777
+    fs::metadata(path)
+        .expect("the file exists")
+        .permissions()
+        .mode()
+        & 0o777
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -144,7 +154,10 @@ async fn a_device_flow_registers_the_runners_with_the_persons_labels_and_deletes
     assert!(flow.steps[0].text.contains(USER_CODE));
     // Nothing is asked of the organisation while the person has not authorised.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(signer.oauth_flow(&flow.id).unwrap().state, FlowState::WaitingForPerson);
+    assert_eq!(
+        signer.oauth_flow(&flow.id).unwrap().state,
+        FlowState::WaitingForPerson
+    );
     assert!(fake.with(|s| s.runners.is_empty()));
 
     fake.with(|s| s.authorized = true);
@@ -155,7 +168,10 @@ async fn a_device_flow_registers_the_runners_with_the_persons_labels_and_deletes
     // The runners: in the named group, with exactly the person's labels, persistent, each with its own key.
     let runners = fake.with(|s| s.runners.clone());
     assert_eq!(runners.len(), 2);
-    let names: Vec<&str> = runners.iter().map(|r| r["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = runners
+        .iter()
+        .map(|r| r["name"].as_str().unwrap())
+        .collect();
     assert_eq!(names, ["acme-box-1", "acme-box-2"]);
     for runner in &runners {
         assert_eq!(runner["group"], 7);
@@ -190,7 +206,10 @@ async fn a_device_flow_registers_the_runners_with_the_persons_labels_and_deletes
         ]
     );
     let last = fake.with(|s| s.seen.last().cloned().expect("a request"));
-    assert_eq!(last.method, "DELETE", "the grant's deletion is the last request");
+    assert_eq!(
+        last.method, "DELETE",
+        "the grant's deletion is the last request"
+    );
 
     // The binding: active, no secret, its runners listed.
     let binding = signer.bindings().pop().expect("a binding");
@@ -198,7 +217,10 @@ async fn a_device_flow_registers_the_runners_with_the_persons_labels_and_deletes
     assert_eq!(binding.status, Status::Active);
     assert_eq!(binding.account, "acme");
     assert_eq!(binding.runner_group.as_ref().unwrap().id, 7);
-    assert_eq!(binding.label_sets, vec![vec!["linux".to_string(), "big-box".to_string()]]);
+    assert_eq!(
+        binding.label_sets,
+        vec![vec!["linux".to_string(), "big-box".to_string()]]
+    );
     assert_eq!(binding.runners.len(), 2);
     assert_eq!(done.binding.as_deref(), Some(binding.id.as_str()));
     let info = signer.binding(&binding.id).expect("the launcher's view");
@@ -225,15 +247,28 @@ async fn a_device_flow_registers_the_runners_with_the_persons_labels_and_deletes
     let modulus = params["modulus"].as_str().unwrap();
     assert!(runners[0]["publicKey"].as_str().unwrap().contains(modulus));
     let size = STANDARD.decode(modulus).unwrap().len();
-    assert_eq!(STANDARD.decode(params["d"].as_str().unwrap()).unwrap().len(), size);
+    assert_eq!(
+        STANDARD
+            .decode(params["d"].as_str().unwrap())
+            .unwrap()
+            .len(),
+        size
+    );
     for half in ["p", "q", "dp", "dq", "inverseQ"] {
         assert_eq!(
-            STANDARD.decode(params[half].as_str().unwrap()).unwrap().len(),
+            STANDARD
+                .decode(params[half].as_str().unwrap())
+                .unwrap()
+                .len(),
             size / 2,
             "{half}"
         );
     }
-    let folder = scratch.0.join("github/runners").join(&binding.id).join("acme-box-1");
+    let folder = scratch
+        .0
+        .join("github/runners")
+        .join(&binding.id)
+        .join("acme-box-1");
     for name in [".runner", ".credentials", ".credentials_rsaparams"] {
         assert_eq!(mode_of(&folder.join(name)), 0o600, "{name}");
     }
@@ -245,7 +280,15 @@ async fn a_device_flow_registers_the_runners_with_the_persons_labels_and_deletes
     let kinds: Vec<&str> = audit.iter().map(|l| l["kind"].as_str().unwrap()).collect();
     assert_eq!(
         kinds,
-        ["oauthAppSet", "oauthStart", "oauthGranted", "register", "register", "grantDeleted", "connect"]
+        [
+            "oauthAppSet",
+            "oauthStart",
+            "oauthGranted",
+            "register",
+            "register",
+            "grantDeleted",
+            "connect"
+        ]
     );
     let register = &audit[3];
     assert_eq!(register["caller"], "token-ops");
@@ -259,7 +302,10 @@ async fn a_device_flow_registers_the_runners_with_the_persons_labels_and_deletes
 
     // No credential in what the signer shows or keeps outside the runners' own folders and the App's secret file.
     assert_no_secret("the flow", &serde_json::to_string(&done).unwrap());
-    assert_no_secret("the bindings", &serde_json::to_string(&signer.bindings()).unwrap());
+    assert_no_secret(
+        "the bindings",
+        &serde_json::to_string(&signer.bindings()).unwrap(),
+    );
     for (path, text) in shown_files(&scratch.0.join("github")) {
         assert_no_secret(&path.display().to_string(), &text);
     }
@@ -299,8 +345,15 @@ async fn with_no_group_named_the_default_group_is_used_and_said_and_a_missing_gr
         made[0].body,
         json!({ "name": "new-group", "visibility": "all", "allows_public_repositories": false })
     );
-    assert!(done.steps.iter().any(|step| step.text.contains("Arca made the runner group")));
-    assert_eq!(fake.with(|s| s.runners.last().unwrap()["group"].clone()), 20);
+    assert!(
+        done.steps
+            .iter()
+            .any(|step| step.text.contains("Arca made the runner group"))
+    );
+    assert_eq!(
+        fake.with(|s| s.runners.last().unwrap()["group"].clone()),
+        20
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -312,7 +365,10 @@ async fn the_legacy_service_registers_agents_in_the_groups_pool() {
         s.admin_flow = false;
     });
     let signer = signer(&scratch, &fake);
-    let flow = signer.oauth_start(request("acme", Some("ci-pool"), 1)).await.unwrap();
+    let flow = signer
+        .oauth_start(request("acme", Some("ci-pool"), 1))
+        .await
+        .unwrap();
     let done = settled(&signer, &flow.id).await;
     assert_eq!(done.state, FlowState::Done, "{:#?}", done.steps);
     let runner = fake.with(|s| s.runners[0].clone());
@@ -328,7 +384,8 @@ async fn the_legacy_service_registers_agents_in_the_groups_pool() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_organisation_that_restricts_oauth_apps_is_told_to_grant_and_the_grant_is_still_deleted() {
+async fn an_organisation_that_restricts_oauth_apps_is_told_to_grant_and_the_grant_is_still_deleted()
+{
     let scratch = Scratch::new();
     let fake = Fake::start("acme").await;
     fake.with(|s| {
@@ -339,8 +396,15 @@ async fn an_organisation_that_restricts_oauth_apps_is_told_to_grant_and_the_gran
     let flow = signer.oauth_start(request("acme", None, 1)).await.unwrap();
     let done = settled(&signer, &flow.id).await;
     assert_eq!(done.state, FlowState::Failed);
-    assert!(done.steps.iter().any(|step| !step.ok && step.text.contains("Grant button")));
-    assert!(fake.with(|s| s.grant_deleted), "a grant that arrived is always deleted");
+    assert!(
+        done.steps
+            .iter()
+            .any(|step| !step.ok && step.text.contains("Grant button"))
+    );
+    assert!(
+        fake.with(|s| s.grant_deleted),
+        "a grant that arrived is always deleted"
+    );
     assert!(signer.bindings().is_empty());
     assert!(fake.with(|s| s.runners.is_empty()));
 }
@@ -355,7 +419,10 @@ async fn a_declined_sign_in_registers_nothing_and_has_no_grant_to_delete() {
     let done = settled(&signer, &flow.id).await;
     assert_eq!(done.state, FlowState::Failed);
     assert!(done.steps.last().unwrap().text.contains("You declined"));
-    assert!(fake.seen("DELETE", &format!("/api/applications/{CLIENT_ID}/grant")).is_empty());
+    assert!(
+        fake.seen("DELETE", &format!("/api/applications/{CLIENT_ID}/grant"))
+            .is_empty()
+    );
     assert!(signer.bindings().is_empty());
 }
 
@@ -368,11 +435,21 @@ async fn a_refused_runner_keeps_the_ones_before_it_and_says_so() {
         s.refuse_name = Some("acme-box-2".to_string());
     });
     let signer = signer(&scratch, &fake);
-    let flow = signer.oauth_start(request("acme", Some("ci-pool"), 3)).await.unwrap();
+    let flow = signer
+        .oauth_start(request("acme", Some("ci-pool"), 3))
+        .await
+        .unwrap();
     let done = settled(&signer, &flow.id).await;
     assert_eq!(done.state, FlowState::Failed);
-    assert!(done.steps.iter().any(|s| !s.ok && s.text.contains("register runner acme-box-2")));
-    let binding = signer.bindings().pop().expect("the runner that was registered is kept");
+    assert!(
+        done.steps
+            .iter()
+            .any(|s| !s.ok && s.text.contains("register runner acme-box-2"))
+    );
+    let binding = signer
+        .bindings()
+        .pop()
+        .expect("the runner that was registered is kept");
     assert_eq!(binding.runners.len(), 1);
     assert!(binding.why.unwrap().contains("1 of 3"));
     assert!(fake.with(|s| s.grant_deleted));
@@ -383,13 +460,25 @@ async fn without_an_oauth_app_nothing_starts_and_bad_arguments_are_named() {
     let scratch = Scratch::new();
     let fake = Fake::start("acme").await;
     let signer = Signer::open(&scratch.0, fake.endpoints(), clock()).unwrap();
-    let error = signer.oauth_start(request("acme", None, 1)).await.unwrap_err();
+    let error = signer
+        .oauth_start(request("acme", None, 1))
+        .await
+        .unwrap_err();
     assert!(format!("{error:?}").contains("NoOauthApp"));
     let signer = self::signer(&scratch, &fake);
     for bad in [
-        OauthRequest { runners: 0, ..request("acme", None, 1) },
-        OauthRequest { account: "-acme".to_string(), ..request("acme", None, 1) },
-        OauthRequest { labels: vec!["has space".to_string()], ..request("acme", None, 1) },
+        OauthRequest {
+            runners: 0,
+            ..request("acme", None, 1)
+        },
+        OauthRequest {
+            account: "-acme".to_string(),
+            ..request("acme", None, 1)
+        },
+        OauthRequest {
+            labels: vec!["has space".to_string()],
+            ..request("acme", None, 1)
+        },
     ] {
         assert!(signer.oauth_start(bad).await.is_err());
     }
@@ -404,7 +493,9 @@ async fn the_verbs_start_a_connection_and_show_its_steps_and_the_log() {
         .unwrap()
         .with_runner_key_bits(1024);
     let handlers: std::collections::HashMap<&str, Arc<dyn arca_mcp::ToolHandler>> =
-        arca::github_handlers::handlers(&signer).into_iter().collect();
+        arca::github_handlers::handlers(&signer)
+            .into_iter()
+            .collect();
     let caller = Caller {
         token_id: "token-ops".to_string(),
         scope: arca_api::verbs::Scope::Operator,
@@ -440,18 +531,27 @@ async fn the_verbs_start_a_connection_and_show_its_steps_and_the_log() {
     let done = settled(&signer, &id).await;
     assert_eq!(done.state, FlowState::Done, "{:#?}", done.steps);
 
-    let status = call("github_connect_status", json!({ "id": id })).await.unwrap().unwrap();
+    let status = call("github_connect_status", json!({ "id": id }))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(status["state"], "done");
     assert!(status["steps"].as_array().unwrap().len() >= 5);
     let listed = call("github_bindings", json!({})).await.unwrap().unwrap();
     assert_eq!(listed["bindings"][0]["mode"], "oauth");
-    assert_eq!(listed["bindings"][0]["runners"][0]["name"].as_str().unwrap().len() > 5, true);
-    let log = call("github_audit", json!({ "limit": 2 })).await.unwrap().unwrap();
+    let runner_name = listed["bindings"][0]["runners"][0]["name"].as_str().unwrap();
+    assert!(runner_name.len() > 5, "{runner_name}");
+    let log = call("github_audit", json!({ "limit": 2 }))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(log["lines"].as_array().unwrap().len(), 2);
     for value in [&status, &listed, &log] {
         assert_no_secret("a verb's answer", &value.to_string());
     }
-    let unknown = call("github_connect_status", json!({ "id": "gho-none" })).await.unwrap();
+    let unknown = call("github_connect_status", json!({ "id": "gho-none" }))
+        .await
+        .unwrap();
     assert!(unknown.is_err());
 }
 
@@ -510,21 +610,47 @@ async fn the_manifest_flow_makes_an_app_with_one_permission_and_mints_runners_fo
         .expect("the flow begins");
     assert_eq!(
         start.action_url,
-        format!("{}/web/organizations/acme/settings/apps/new?state={}", fake.base, start.state)
+        format!(
+            "{}/web/organizations/acme/settings/apps/new?state={}",
+            fake.base, start.state
+        )
     );
     let manifest: Value = serde_json::from_str(&start.manifest).unwrap();
-    assert_eq!(manifest["default_permissions"], json!({ "organization_self_hosted_runners": "write" }));
+    assert_eq!(
+        manifest["default_permissions"],
+        json!({ "organization_self_hosted_runners": "write" })
+    );
     assert_eq!(manifest["default_events"], json!([]));
     assert_eq!(manifest["hook_attributes"]["active"], false);
     assert_eq!(manifest["public"], false);
-    assert_eq!(manifest["redirect_url"], "https://arca.example.com/approve/github/created");
-    assert_eq!(manifest["setup_url"], "https://arca.example.com/approve/github/installed");
+    assert_eq!(
+        manifest["redirect_url"],
+        "https://arca.example.com/approve/github/created"
+    );
+    assert_eq!(
+        manifest["setup_url"],
+        "https://arca.example.com/approve/github/installed"
+    );
 
     // A state Arca never gave is refused before GitHub is asked anything.
-    assert!(signer.app_created(MANIFEST_CODE, "not-a-state").await.is_err());
-    assert!(fake.seen("POST", &format!("/api/app-manifests/{MANIFEST_CODE}/conversions")).is_empty());
+    assert!(
+        signer
+            .app_created(MANIFEST_CODE, "not-a-state")
+            .await
+            .is_err()
+    );
+    assert!(
+        fake.seen(
+            "POST",
+            &format!("/api/app-manifests/{MANIFEST_CODE}/conversions")
+        )
+        .is_empty()
+    );
 
-    let install = signer.app_created(MANIFEST_CODE, &start.state).await.expect("the App is handed over");
+    let install = signer
+        .app_created(MANIFEST_CODE, &start.state)
+        .await
+        .expect("the App is handed over");
     assert_eq!(
         install,
         format!(
@@ -536,10 +662,16 @@ async fn the_manifest_flow_makes_an_app_with_one_permission_and_mints_runners_fo
     assert_eq!(binding.mode, Mode::App);
     assert_eq!(binding.status, Status::AwaitingInstall);
     assert_eq!(binding.app.as_ref().unwrap().client_id, APP_CLIENT_ID);
-    let key = scratch.0.join("github/keys").join(format!("{}.pem", binding.id));
+    let key = scratch
+        .0
+        .join("github/keys")
+        .join(format!("{}.pem", binding.id));
     assert_eq!(mode_of(&key), 0o600);
     assert_eq!(
-        signer.mint(mint_request(&binding.id, "r-0", &["linux", "x64"], None)).await.unwrap_err(),
+        signer
+            .mint(mint_request(&binding.id, "r-0", &["linux", "x64"], None))
+            .await
+            .unwrap_err(),
         MintRefused::NotInstalled
     );
 
@@ -566,7 +698,10 @@ async fn the_manifest_flow_makes_an_app_with_one_permission_and_mints_runners_fo
         })
     );
     let group = binding.runner_group.clone().unwrap();
-    assert_eq!((group.id, group.created_by_arca, group.warning.is_none()), (20, true, true));
+    assert_eq!(
+        (group.id, group.created_by_arca, group.warning.is_none()),
+        (20, true, true)
+    );
     let info = signer.binding(&binding.id).unwrap();
     assert_eq!(info.runner_group_id, Some(20));
     assert_eq!(info.org_url, format!("{}/web/acme", fake.base));
@@ -574,7 +709,11 @@ async fn the_manifest_flow_makes_an_app_with_one_permission_and_mints_runners_fo
     // A runner per job, with exactly one of the binding's label sets, in any order.
     let minted = signer
         .mint(MintRequest {
-            job: Some(JobRef { repo: "acme/web".to_string(), run_id: Some(9), ..JobRef::default() }),
+            job: Some(JobRef {
+                repo: "acme/web".to_string(),
+                run_id: Some(9),
+                ..JobRef::default()
+            }),
             ..mint_request(&binding.id, "acme-job-1", &["x64", "linux"], None)
         })
         .await
@@ -588,13 +727,35 @@ async fn the_manifest_flow_makes_an_app_with_one_permission_and_mints_runners_fo
     assert_eq!(runner["workFolder"], "_work");
     signer.attach_job(
         minted.mint_id,
-        &JobRef { repo: "acme/web".to_string(), job_id: Some(77), ..JobRef::default() },
+        &JobRef {
+            repo: "acme/web".to_string(),
+            job_id: Some(77),
+            ..JobRef::default()
+        },
     );
-    signer.mint(mint_request(&binding.id, "acme-job-2", &["gpu"], None)).await.expect("a second runner");
+    signer
+        .mint(mint_request(&binding.id, "acme-job-2", &["gpu"], None))
+        .await
+        .expect("a second runner");
     // One installation token serves both mints.
-    assert_eq!(fake.seen("POST", &format!("/api/app/installations/{INSTALLATION}/access_tokens")).len(), 1);
+    assert_eq!(
+        fake.seen(
+            "POST",
+            &format!("/api/app/installations/{INSTALLATION}/access_tokens")
+        )
+        .len(),
+        1
+    );
 
-    match signer.mint(mint_request(&binding.id, "acme-job-3", &["gpu", "linux"], None)).await {
+    match signer
+        .mint(mint_request(
+            &binding.id,
+            "acme-job-3",
+            &["gpu", "linux"],
+            None,
+        ))
+        .await
+    {
         Err(MintRefused::LabelsNotAllowed { allowed }) => assert_eq!(allowed.len(), 2),
         other => panic!("labels outside the sets are refused: {other:?}"),
     }
@@ -602,7 +763,10 @@ async fn the_manifest_flow_makes_an_app_with_one_permission_and_mints_runners_fo
     // A scale set's runner: the Actions service connection is made once and kept, and only a scale set of the
     // binding's own runner group gets one.
     fake.with(|s| s.scale_sets = vec![(3, 20), (4, 7)]);
-    let connection = signer.actions_connection(&binding.id).await.expect("a connection");
+    let connection = signer
+        .actions_connection(&binding.id)
+        .await
+        .expect("a connection");
     assert_eq!(connection.service_url, format!("{}/tenant", fake.base));
     for name in ["scale-1", "scale-2"] {
         let minted = signer
@@ -611,19 +775,55 @@ async fn the_manifest_flow_makes_an_app_with_one_permission_and_mints_runners_fo
             .expect("a scale set's runner is minted");
         assert!(minted.encoded_jit_config.expose().starts_with(JIT));
     }
-    assert_eq!(fake.seen("POST", "/api/actions/runner-registration").len(), 1);
-    assert_eq!(fake.with(|s| s.runners.last().unwrap()["scaleSet"].clone()), 3);
+    assert_eq!(
+        fake.seen("POST", "/api/actions/runner-registration").len(),
+        1
+    );
+    assert_eq!(
+        fake.with(|s| s.runners.last().unwrap()["scaleSet"].clone()),
+        3
+    );
     let runners = fake.with(|s| s.runners.len());
     assert_eq!(
-        signer.mint(mint_request(&binding.id, "other-group", &["linux", "x64"], Some(4))).await.unwrap_err(),
-        MintRefused::ScaleSetOutsideGroup { scale_set: 4, scale_set_group: Some(7), group: Some(20) }
+        signer
+            .mint(mint_request(
+                &binding.id,
+                "other-group",
+                &["linux", "x64"],
+                Some(4)
+            ))
+            .await
+            .unwrap_err(),
+        MintRefused::ScaleSetOutsideGroup {
+            scale_set: 4,
+            scale_set_group: Some(7),
+            group: Some(20)
+        }
     );
-    assert_eq!(fake.with(|s| s.runners.len()), runners, "no runner is made for another group's scale set");
-    assert!(fake.seen("POST", "/tenant/_apis/runtime/runnerscalesets/4/generatejitconfig").is_empty());
+    assert_eq!(
+        fake.with(|s| s.runners.len()),
+        runners,
+        "no runner is made for another group's scale set"
+    );
+    assert!(
+        fake.seen(
+            "POST",
+            "/tenant/_apis/runtime/runnerscalesets/4/generatejitconfig"
+        )
+        .is_empty()
+    );
 
     let audit = signer.audit_log(None, 100);
     let kinds: Vec<&str> = audit.iter().map(|l| l["kind"].as_str().unwrap()).collect();
-    for kind in ["appStart", "appCreated", "appInstalled", "sync", "mint", "job", "actionsConnection"] {
+    for kind in [
+        "appStart",
+        "appCreated",
+        "appInstalled",
+        "sync",
+        "mint",
+        "job",
+        "actionsConnection",
+    ] {
         assert!(kinds.contains(&kind), "{kind} is logged: {kinds:?}");
     }
     let mints: Vec<&Value> = audit.iter().filter(|l| l["kind"] == "mint").collect();
@@ -655,11 +855,22 @@ async fn an_app_suspended_uninstalled_or_deleted_on_github_is_seen_at_the_next_m
 
     // Suspended: the cached token stops working, the next one is refused as suspended, and lifting it heals the binding.
     fake.with(|s| s.suspended = true);
-    assert!(matches!(mint("a").await, Err(MintRefused::GitHub { status: Some(401), .. })));
-    assert!(matches!(mint("b").await, Err(MintRefused::Suspended { .. })));
+    assert!(matches!(
+        mint("a").await,
+        Err(MintRefused::GitHub {
+            status: Some(401),
+            ..
+        })
+    ));
+    assert!(matches!(
+        mint("b").await,
+        Err(MintRefused::Suspended { .. })
+    ));
     assert_eq!(signer.bindings()[0].status, Status::Suspended);
     fake.with(|s| s.suspended = false);
-    mint("c").await.expect("a runner once the suspension is lifted");
+    mint("c")
+        .await
+        .expect("a runner once the suspension is lifted");
     assert_eq!(signer.bindings()[0].status, Status::Active);
 
     // Uninstalled on GitHub.
@@ -677,9 +888,17 @@ async fn an_app_suspended_uninstalled_or_deleted_on_github_is_seen_at_the_next_m
     let fake = Fake::start("acme").await;
     let signer = self::signer(&scratch, &fake);
     let id = installed_app(&signer, &fake).await;
-    signer.mint(mint_request(&id, "warm", &["gpu"], None)).await.expect("a runner");
+    signer
+        .mint(mint_request(&id, "warm", &["gpu"], None))
+        .await
+        .expect("a runner");
     fake.with(|s| s.app_deleted = true);
-    assert!(signer.mint(mint_request(&id, "a", &["gpu"], None)).await.is_err());
+    assert!(
+        signer
+            .mint(mint_request(&id, "a", &["gpu"], None))
+            .await
+            .is_err()
+    );
     match signer.mint(mint_request(&id, "b", &["gpu"], None)).await {
         Err(MintRefused::Revoked { why }) => assert!(why.contains("deleted"), "{why}"),
         other => panic!("a deleted App revokes the binding: {other:?}"),
@@ -701,25 +920,39 @@ async fn disconnecting_an_app_uninstalls_it_deletes_its_key_and_links_to_deletin
     let key = scratch.0.join("github/keys").join(format!("{id}.pem"));
     assert!(key.exists());
 
-    let binding = signer.revoke(&id, "page:passkey-1").await.expect("disconnected");
+    let binding = signer
+        .revoke(&id, "page:passkey-1")
+        .await
+        .expect("disconnected");
     assert_eq!(binding.status, Status::Revoked);
     let why = binding.why.unwrap();
     assert!(why.contains("uninstalled"), "{why}");
-    assert!(why.contains(&format!("/organizations/acme/settings/apps/{APP_SLUG}/advanced")), "{why}");
+    assert!(
+        why.contains(&format!(
+            "/organizations/acme/settings/apps/{APP_SLUG}/advanced"
+        )),
+        "{why}"
+    );
     let deleted = fake.seen("DELETE", &format!("/api/app/installations/{INSTALLATION}"));
     assert_eq!(deleted.len(), 1);
     assert!(!fake.with(|s| s.installed));
     assert!(!key.exists(), "the App's key is deleted");
     assert!(matches!(
-        signer.mint(mint_request(&id, "after", &["gpu"], None)).await,
+        signer
+            .mint(mint_request(&id, "after", &["gpu"], None))
+            .await,
         Err(MintRefused::Revoked { .. })
     ));
     let last = signer.audit_log(Some(&id), 100);
-    assert!(last.iter().any(|l| l["kind"] == "revoke" && l["caller"] == "page:passkey-1"));
+    assert!(
+        last.iter()
+            .any(|l| l["kind"] == "revoke" && l["caller"] == "page:passkey-1")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_plan_without_runner_groups_falls_back_to_the_default_group_and_an_existing_group_is_adopted() {
+async fn a_plan_without_runner_groups_falls_back_to_the_default_group_and_an_existing_group_is_adopted()
+ {
     let scratch = Scratch::new();
     let fake = Fake::start("acme").await;
     fake.with(|s| s.group_create_refusal = Some(403));
@@ -728,27 +961,42 @@ async fn a_plan_without_runner_groups_falls_back_to_the_default_group_and_an_exi
     let group = signer.bindings()[0].runner_group.clone().unwrap();
     assert_eq!(group.id, 1);
     assert!(group.warning.unwrap().contains("default group"));
-    let minted = signer.mint(mint_request(&id, "r", &["gpu"], None)).await.expect("a runner");
+    let minted = signer
+        .mint(mint_request(&id, "r", &["gpu"], None))
+        .await
+        .expect("a runner");
     assert_eq!(minted.runner_group_id, Some(1));
 
     let scratch = Scratch::new();
     let fake = Fake::start("acme").await;
-    fake.with(|s| s.groups.push(json!({ "id": 9, "name": RUNNER_GROUP_NAME, "default": false, "visibility": "all" })));
+    fake.with(|s| {
+        s.groups.push(
+            json!({ "id": 9, "name": RUNNER_GROUP_NAME, "default": false, "visibility": "all" }),
+        )
+    });
     let signer = self::signer(&scratch, &fake);
     installed_app(&signer, &fake).await;
     let group = signer.bindings()[0].runner_group.clone().unwrap();
     assert_eq!((group.id, group.created_by_arca), (9, true));
-    assert_eq!(fake.seen("PATCH", "/api/orgs/acme/actions/runner-groups/9")[0].body["visibility"], "selected");
-    assert_eq!(fake.with(|s| s.group_repositories.clone()), vec![(9, json!([11, 12]))]);
+    assert_eq!(
+        fake.seen("PATCH", "/api/orgs/acme/actions/runner-groups/9")[0].body["visibility"],
+        "selected"
+    );
+    assert_eq!(
+        fake.with(|s| s.group_repositories.clone()),
+        vec![(9, json!([11, 12]))]
+    );
 }
 
 // ---- Push mode ----------------------------------------------------------------------------------------------------
 
 /// A configuration shaped like GitHub's `encoded_jit_config`.
 fn pushed_config(agent: u64, name: &str) -> String {
-    let runner = STANDARD.encode(json!({ "agentId": agent, "agentName": name, "poolId": 7 }).to_string());
+    let runner =
+        STANDARD.encode(json!({ "agentId": agent, "agentName": name, "poolId": 7 }).to_string());
     STANDARD.encode(
-        json!({ ".runner": runner, ".credentials": "Y3JlZA==", ".credentials_rsaparams": "a2V5" }).to_string(),
+        json!({ ".runner": runner, ".credentials": "Y3JlZA==", ".credentials_rsaparams": "a2V5" })
+            .to_string(),
     )
 }
 
@@ -763,15 +1011,37 @@ async fn pushed_configurations_are_taken_with_the_intake_token_and_handed_out_on
     assert_eq!(binding.mode, Mode::Push);
     assert!(token.expose().starts_with("arcaintake_"));
     assert!(matches!(
-        signer.mint(mint_request(&binding.id, "x", &["linux", "x64"], None)).await,
+        signer
+            .mint(mint_request(&binding.id, "x", &["linux", "x64"], None))
+            .await,
         Err(MintRefused::Empty)
     ));
 
-    let body = json!({ "encodedJitConfig": pushed_config(77, "pushed-1"), "labels": ["x64", "linux"] });
-    assert_eq!(signer.intake(&binding.id, "arcaintake_wrong", &body).unwrap_err().status, 401);
-    let wrong_labels = json!({ "encodedJitConfig": pushed_config(78, "pushed-2"), "labels": ["gpu"] });
-    assert_eq!(signer.intake(&binding.id, token.expose(), &wrong_labels).unwrap_err().status, 422);
-    assert_eq!(signer.intake(&binding.id, token.expose(), &json!({})).unwrap_err().status, 400);
+    let body =
+        json!({ "encodedJitConfig": pushed_config(77, "pushed-1"), "labels": ["x64", "linux"] });
+    assert_eq!(
+        signer
+            .intake(&binding.id, "arcaintake_wrong", &body)
+            .unwrap_err()
+            .status,
+        401
+    );
+    let wrong_labels =
+        json!({ "encodedJitConfig": pushed_config(78, "pushed-2"), "labels": ["gpu"] });
+    assert_eq!(
+        signer
+            .intake(&binding.id, token.expose(), &wrong_labels)
+            .unwrap_err()
+            .status,
+        422
+    );
+    assert_eq!(
+        signer
+            .intake(&binding.id, token.expose(), &json!({}))
+            .unwrap_err()
+            .status,
+        400
+    );
     assert_eq!(signer.intake(&binding.id, token.expose(), &body), Ok(1));
 
     // Through the kernel's HTTP route too: a browser's request is refused, a bearer's is queued.
@@ -788,7 +1058,11 @@ async fn pushed_configurations_are_taken_with_the_intake_token_and_handed_out_on
         async move {
             use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
             let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
-            let origin = if origin { "Origin: https://evil.example.com\r\n" } else { "" };
+            let origin = if origin {
+                "Origin: https://evil.example.com\r\n"
+            } else {
+                ""
+            };
             let request = format!(
                 "POST {path} HTTP/1.1\r\nHost: arca.example.com\r\nAuthorization: Bearer {token}\r\n{origin}\
                  Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -806,27 +1080,75 @@ async fn pushed_configurations_are_taken_with_the_intake_token_and_handed_out_on
     assert!(answer.contains(r#""queued":2"#), "{answer}");
 
     let first = signer
-        .mint(mint_request(&binding.id, "ignored", &["linux", "x64"], None))
+        .mint(mint_request(
+            &binding.id,
+            "ignored",
+            &["linux", "x64"],
+            None,
+        ))
         .await
         .expect("the first pushed configuration");
-    assert_eq!((first.runner_id, first.runner_name.as_str()), (77, "pushed-1"));
-    assert_eq!(first.encoded_jit_config.expose(), pushed_config(77, "pushed-1"));
-    let second = signer.mint(mint_request(&binding.id, "ignored", &["linux", "x64"], None)).await.unwrap();
+    assert_eq!(
+        (first.runner_id, first.runner_name.as_str()),
+        (77, "pushed-1")
+    );
+    assert_eq!(
+        first.encoded_jit_config.expose(),
+        pushed_config(77, "pushed-1")
+    );
+    let second = signer
+        .mint(mint_request(
+            &binding.id,
+            "ignored",
+            &["linux", "x64"],
+            None,
+        ))
+        .await
+        .unwrap();
     assert_eq!(second.runner_id, 79);
     assert!(matches!(
-        signer.mint(mint_request(&binding.id, "ignored", &["linux", "x64"], None)).await,
+        signer
+            .mint(mint_request(
+                &binding.id,
+                "ignored",
+                &["linux", "x64"],
+                None
+            ))
+            .await,
         Err(MintRefused::Empty)
     ));
 
-    signer.intake(&binding.id, token.expose(), &body).expect("one more waits");
-    signer.revoke(&binding.id, "page:passkey-1").await.expect("disconnected");
-    assert_eq!(signer.intake(&binding.id, token.expose(), &body).unwrap_err().status, 401);
-    assert!(!scratch.0.join("github/intake").join(&binding.id).exists(), "the waiting configurations are deleted");
+    signer
+        .intake(&binding.id, token.expose(), &body)
+        .expect("one more waits");
+    signer
+        .revoke(&binding.id, "page:passkey-1")
+        .await
+        .expect("disconnected");
+    assert_eq!(
+        signer
+            .intake(&binding.id, token.expose(), &body)
+            .unwrap_err()
+            .status,
+        401
+    );
+    assert!(
+        !scratch.0.join("github/intake").join(&binding.id).exists(),
+        "the waiting configurations are deleted"
+    );
     let audit = signer.audit_log(Some(&binding.id), 100);
     assert_eq!(audit.iter().filter(|l| l["kind"] == "intake").count(), 3);
     for (path, text) in shown_files(&scratch.0) {
-        assert!(!text.contains(token.expose()), "{} holds the intake token", path.display());
-        assert!(!text.contains(&pushed_config(77, "pushed-1")), "{} holds a configuration", path.display());
+        assert!(
+            !text.contains(token.expose()),
+            "{} holds the intake token",
+            path.display()
+        );
+        assert!(
+            !text.contains(&pushed_config(77, "pushed-1")),
+            "{} holds a configuration",
+            path.display()
+        );
     }
 }
 
@@ -836,15 +1158,24 @@ async fn a_device_flow_connection_mints_nothing() {
     let fake = Fake::start("acme").await;
     fake.with(|s| s.authorized = true);
     let signer = signer(&scratch, &fake);
-    let flow = signer.oauth_start(request("acme", Some("ci-pool"), 1)).await.unwrap();
+    let flow = signer
+        .oauth_start(request("acme", Some("ci-pool"), 1))
+        .await
+        .unwrap();
     let done = settled(&signer, &flow.id).await;
     let binding = done.binding.unwrap();
     assert_eq!(
-        signer.mint(mint_request(&binding, "x", &["linux", "big-box"], None)).await.unwrap_err(),
+        signer
+            .mint(mint_request(&binding, "x", &["linux", "big-box"], None))
+            .await
+            .unwrap_err(),
         MintRefused::NotMintable
     );
     assert_eq!(
-        signer.mint(mint_request("gh-nope", "x", &["linux"], None)).await.unwrap_err(),
+        signer
+            .mint(mint_request("gh-nope", "x", &["linux"], None))
+            .await
+            .unwrap_err(),
         MintRefused::UnknownBinding
     );
 }
@@ -862,16 +1193,32 @@ async fn a_grant_github_does_not_confirm_deleted_is_said_plainly_with_where_to_r
         .set_oauth_app(CLIENT_ID, &Secret::new("an-old-secret-0123456789"))
         .expect("the OAuth App is set");
 
-    let flow = signer.oauth_start(request("acme", Some("ci-pool"), 1)).await.unwrap();
+    let flow = signer
+        .oauth_start(request("acme", Some("ci-pool"), 1))
+        .await
+        .unwrap();
     let done = settled(&signer, &flow.id).await;
     assert_eq!(done.state, FlowState::Done, "{:#?}", done.steps);
     assert!(!fake.with(|s| s.grant_deleted));
     let texts: Vec<&str> = done.steps.iter().map(|step| step.text.as_str()).collect();
-    assert!(!texts.iter().any(|text| text.contains("The grant is deleted")), "{texts:#?}");
-    let refused = done.steps.iter().find(|step| step.text.contains("NOT deleted")).expect("said plainly");
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.contains("The grant is deleted")),
+        "{texts:#?}"
+    );
+    let refused = done
+        .steps
+        .iter()
+        .find(|step| step.text.contains("NOT deleted"))
+        .expect("said plainly");
     assert!(!refused.ok);
     assert!(refused.text.contains("404"), "{}", refused.text);
-    assert!(refused.text.contains(arca::github_oauth::REVOKE_URL), "{}", refused.text);
+    assert!(
+        refused.text.contains(arca::github_oauth::REVOKE_URL),
+        "{}",
+        refused.text
+    );
     let last = done.steps.last().unwrap();
     assert!(last.text.contains("still in place"), "{}", last.text);
     assert!(!last.text.contains("holds no access"));
@@ -880,7 +1227,10 @@ async fn a_grant_github_does_not_confirm_deleted_is_said_plainly_with_where_to_r
         .into_iter()
         .find(|line| line["kind"] == "grantDeleted")
         .expect("the deletion is logged");
-    assert_eq!((line["ok"].clone(), line["status"].clone()), (json!(false), json!(404)));
+    assert_eq!(
+        (line["ok"].clone(), line["status"].clone()),
+        (json!(false), json!(404))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -893,7 +1243,10 @@ async fn a_busy_github_is_asked_again_and_slow_down_is_obeyed_while_polling() {
     });
     let signer = signer(&scratch, &fake);
     let started = Instant::now();
-    let flow = signer.oauth_start(request("acme", Some("ci-pool"), 1)).await.unwrap();
+    let flow = signer
+        .oauth_start(request("acme", Some("ci-pool"), 1))
+        .await
+        .unwrap();
     let done = settled(&signer, &flow.id).await;
     assert_eq!(done.state, FlowState::Done, "{:#?}", done.steps);
     assert_eq!(fake.seen("POST", "/web/login/oauth/access_token").len(), 4);

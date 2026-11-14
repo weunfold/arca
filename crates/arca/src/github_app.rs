@@ -133,22 +133,36 @@ pub struct Minted {
 pub enum MintRefused {
     UnknownBinding,
     /// The labels are none of the binding's sets.
-    LabelsNotAllowed { allowed: Vec<Vec<String>> },
+    LabelsNotAllowed {
+        allowed: Vec<Vec<String>>,
+    },
     /// The App is made and not installed yet.
     NotInstalled,
     /// The binding is revoked; nothing is minted until it is connected again.
-    Revoked { why: String },
+    Revoked {
+        why: String,
+    },
     /// GitHub suspended the installation. The next mint asks again.
-    Suspended { why: String },
+    Suspended {
+        why: String,
+    },
     /// A push binding has no configuration with those labels queued.
     Empty,
     /// An OAuth binding registered lasting runners and mints none.
     NotMintable,
     /// The scale set is not in the connection's runner group: Arca mints only into the group made for the
     /// repositories the person picked. `scale_set_group` is the group GitHub says the scale set is in.
-    ScaleSetOutsideGroup { scale_set: u64, scale_set_group: Option<u64>, group: Option<u64> },
+    ScaleSetOutsideGroup {
+        scale_set: u64,
+        scale_set_group: Option<u64>,
+        group: Option<u64>,
+    },
     /// GitHub refused or did not answer. `retry` says whether the same call may succeed later as it is.
-    GitHub { status: Option<u16>, why: String, retry: bool },
+    GitHub {
+        status: Option<u16>,
+        why: String,
+        retry: bool,
+    },
     Store(String),
 }
 
@@ -179,13 +193,22 @@ impl MintRefused {
                     .collect::<Vec<_>>()
                     .join(" ")
             ),
-            Self::NotInstalled => "the App is made and not installed in the organisation yet".to_string(),
-            Self::Revoked { why } | Self::Suspended { why } => why.clone(),
-            Self::Empty => "no pushed runner configuration with those labels is waiting".to_string(),
-            Self::NotMintable => {
-                "this connection registered lasting runners and mints none: use its runners' files".to_string()
+            Self::NotInstalled => {
+                "the App is made and not installed in the organisation yet".to_string()
             }
-            Self::ScaleSetOutsideGroup { scale_set, scale_set_group, group } => format!(
+            Self::Revoked { why } | Self::Suspended { why } => why.clone(),
+            Self::Empty => {
+                "no pushed runner configuration with those labels is waiting".to_string()
+            }
+            Self::NotMintable => {
+                "this connection registered lasting runners and mints none: use its runners' files"
+                    .to_string()
+            }
+            Self::ScaleSetOutsideGroup {
+                scale_set,
+                scale_set_group,
+                group,
+            } => format!(
                 "scale set {scale_set} is in runner group {}, not this connection's runner group {}: Arca mints only \
                  into the group made for the repositories the person picked",
                 scale_set_group.map_or_else(|| "unknown".to_string(), |id| id.to_string()),
@@ -247,7 +270,9 @@ impl Signer {
     ) -> Result<AppStart, SignerError> {
         check_account(account)?;
         if label_sets.is_empty() || label_sets.len() > 10 {
-            return Err(SignerError::Invalid("labels: one to ten label sets".to_string()));
+            return Err(SignerError::Invalid(
+                "labels: one to ten label sets".to_string(),
+            ));
         }
         let label_sets = label_sets
             .iter()
@@ -315,7 +340,9 @@ impl Signer {
         )?;
         if code.is_empty()
             || code.len() > 200
-            || !code.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            || !code
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
             return Err("GitHub's code in the link is not one GitHub gives.".to_string());
         }
@@ -324,14 +351,20 @@ impl Signer {
             .http
             .send(
                 Method::POST,
-                &self.inner.http.api(&format!("/app-manifests/{code}/conversions")),
+                &self
+                    .inner
+                    .http
+                    .api(&format!("/app-manifests/{code}/conversions")),
                 Auth::None,
                 None,
             )
             .await
             .map_err(|why| format!("Arca could not reach GitHub to take the new App: {why}."))?;
         if !answer.ok() {
-            return Err(format!("GitHub did not hand the new App over: {}.", answer.why()));
+            return Err(format!(
+                "GitHub did not hand the new App over: {}.",
+                answer.why()
+            ));
         }
         let app = answer.json();
         let field = |key: &str| app.get(key).and_then(Value::as_str).map(str::to_string);
@@ -341,17 +374,23 @@ impl Signer {
             field("client_id"),
             field("pem"),
         ) else {
-            return Err("GitHub's answer for the new App was missing its id, name or key.".to_string());
+            return Err(
+                "GitHub's answer for the new App was missing its id, name or key.".to_string(),
+            );
         };
         let owner_login = app
             .pointer("/owner/login")
             .and_then(Value::as_str)
             .unwrap_or(&flow.account)
             .to_string();
-        let owner_id = app.pointer("/owner/id").and_then(Value::as_u64).unwrap_or(0);
+        let owner_id = app
+            .pointer("/owner/id")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         AppKey::from_pem(&pem).map_err(|why| format!("GitHub's key for the new App: {why}."))?;
         let binding_id = fresh_id("gh-").map_err(|error| error.message())?;
-        write_private(&self.key_path(&binding_id), pem.as_bytes()).map_err(|error| error.message())?;
+        write_private(&self.key_path(&binding_id), pem.as_bytes())
+            .map_err(|error| error.message())?;
         let now = self.now();
         let binding = Binding {
             id: binding_id.clone(),
@@ -399,8 +438,14 @@ impl Signer {
 
     /// GitHub's return after the person installed (or changed) the App: checks the installation with the App's own JWT,
     /// records it, and puts the runner group in place. Answers the binding's id; `Err` is in words for the person.
-    pub async fn app_installed(&self, installation_id: u64, state: Option<&str>) -> Result<String, String> {
-        let from_flow = state.and_then(|state| self.app_flow(state)).and_then(|flow| flow.binding);
+    pub async fn app_installed(
+        &self,
+        installation_id: u64,
+        state: Option<&str>,
+    ) -> Result<String, String> {
+        let from_flow = state
+            .and_then(|state| self.app_flow(state))
+            .and_then(|flow| flow.binding);
         let candidates: Vec<String> = match from_flow {
             Some(id) => vec![id],
             None => self
@@ -417,12 +462,17 @@ impl Signer {
                 .http
                 .send(
                     Method::GET,
-                    &self.inner.http.api(&format!("/app/installations/{installation_id}")),
+                    &self
+                        .inner
+                        .http
+                        .api(&format!("/app/installations/{installation_id}")),
                     Auth::Bearer(&jwt),
                     None,
                 )
                 .await
-                .map_err(|why| format!("Arca could not reach GitHub to check the installation: {why}."))?;
+                .map_err(|why| {
+                    format!("Arca could not reach GitHub to check the installation: {why}.")
+                })?;
             if !answer.ok() {
                 continue;
             }
@@ -433,7 +483,10 @@ impl Signer {
                 .get(&id)
                 .cloned()
                 .ok_or("the connection is gone")?;
-            if let Some(login) = installation.pointer("/account/login").and_then(Value::as_str) {
+            if let Some(login) = installation
+                .pointer("/account/login")
+                .and_then(Value::as_str)
+            {
                 binding.account = login.to_string();
             }
             binding.installation = Some(InstallationRecord {
@@ -448,7 +501,8 @@ impl Signer {
             binding.status = Status::Active;
             binding.why = None;
             binding.updated_at = self.now();
-            self.save(binding.clone()).map_err(|error| error.message())?;
+            self.save(binding.clone())
+                .map_err(|error| error.message())?;
             self.lock().installation_tokens.remove(&id);
             self.audit(json!({
                 "kind": "appInstalled",
@@ -457,8 +511,15 @@ impl Signer {
                 "installationId": installation_id,
             }));
             if let Err(why) = self.sync(&id).await {
-                let mut binding = self.lock().bindings.get(&id).cloned().ok_or("the connection is gone")?;
-                binding.why = Some(format!("Installed; the runner group is not in place yet: {why}"));
+                let mut binding = self
+                    .lock()
+                    .bindings
+                    .get(&id)
+                    .cloned()
+                    .ok_or("the connection is gone")?;
+                binding.why = Some(format!(
+                    "Installed; the runner group is not in place yet: {why}"
+                ));
                 self.save(binding).map_err(|error| error.message())?;
             }
             if let Some(state) = state {
@@ -466,15 +527,26 @@ impl Signer {
             }
             return Ok(id);
         }
-        Err("No App Arca made answers for that installation. Start again from Arca's GitHub page.".to_string())
+        Err(
+            "No App Arca made answers for that installation. Start again from Arca's GitHub page."
+                .to_string(),
+        )
     }
 
     /// Reads the installation's repositories and puts the runner group in place: Arca's own group made with exactly
     /// those repositories (public repositories off) or brought up to date, or, when GitHub lets Arca make no group, the
     /// organisation's default group with a warning.
     pub async fn sync(&self, id: &str) -> Result<(), String> {
-        let binding = self.lock().bindings.get(id).cloned().ok_or("no such connection")?;
-        let token = self.installation_token(id).await.map_err(|refused| refused.message())?;
+        let binding = self
+            .lock()
+            .bindings
+            .get(id)
+            .cloned()
+            .ok_or("no such connection")?;
+        let token = self
+            .installation_token(id)
+            .await
+            .map_err(|refused| refused.message())?;
         let http = &self.inner.http;
         let mut names = Vec::new();
         let mut ids = Vec::new();
@@ -482,7 +554,9 @@ impl Signer {
             let answer = http
                 .send(
                     Method::GET,
-                    &http.api(&format!("/installation/repositories?per_page=100&page={page}")),
+                    &http.api(&format!(
+                        "/installation/repositories?per_page=100&page={page}"
+                    )),
                     Auth::Bearer(&token),
                     None,
                 )
@@ -515,7 +589,10 @@ impl Signer {
                 let answer = http
                     .send(
                         Method::PUT,
-                        &http.api(&format!("/orgs/{org}/actions/runner-groups/{}/repositories", group.id)),
+                        &http.api(&format!(
+                            "/orgs/{org}/actions/runner-groups/{}/repositories",
+                            group.id
+                        )),
                         Auth::Bearer(&token),
                         Some(&json!({ "selected_repository_ids": ids })),
                     )
@@ -528,7 +605,12 @@ impl Signer {
             Some(group) => group,
             None => self.make_group(&org, &ids, &token).await?,
         };
-        let mut binding = self.lock().bindings.get(id).cloned().ok_or("no such connection")?;
+        let mut binding = self
+            .lock()
+            .bindings
+            .get(id)
+            .cloned()
+            .ok_or("no such connection")?;
         if let Some(installation) = binding.installation.as_mut() {
             installation.repositories = names.clone();
         }
@@ -545,7 +627,12 @@ impl Signer {
         Ok(())
     }
 
-    async fn make_group(&self, org: &str, ids: &[u64], token: &Secret) -> Result<RunnerGroup, String> {
+    async fn make_group(
+        &self,
+        org: &str,
+        ids: &[u64],
+        token: &Secret,
+    ) -> Result<RunnerGroup, String> {
         let http = &self.inner.http;
         let answer = http
             .send(
@@ -563,7 +650,10 @@ impl Signer {
         if answer.ok() {
             let body = answer.json();
             return Ok(RunnerGroup {
-                id: body.get("id").and_then(Value::as_u64).ok_or("GitHub's new group had no id")?,
+                id: body
+                    .get("id")
+                    .and_then(Value::as_u64)
+                    .ok_or("GitHub's new group had no id")?,
                 name: RUNNER_GROUP_NAME.to_string(),
                 created_by_arca: true,
                 warning: None,
@@ -600,7 +690,9 @@ impl Signer {
                         json!({ "selected_repository_ids": ids }),
                     ),
                 ] {
-                    let answer = http.send(method, &http.api(&path), Auth::Bearer(token), Some(&body)).await?;
+                    let answer = http
+                        .send(method, &http.api(&path), Auth::Bearer(token), Some(&body))
+                        .await?;
                     if !answer.ok() {
                         return Err(answer.why());
                     }
@@ -643,7 +735,8 @@ impl Signer {
             why: "Arca no longer holds this App's key.".to_string(),
         })?;
         let key = AppKey::from_pem(&pem).map_err(MintRefused::Store)?;
-        key.jwt(&issuer, self.now() / 1000).map_err(MintRefused::Store)
+        key.jwt(&issuer, self.now() / 1000)
+            .map_err(MintRefused::Store)
     }
 
     fn mark(&self, binding: &str, status: Status, why: &str) {
@@ -661,7 +754,9 @@ impl Signer {
         state.actions.remove(binding);
         drop(state);
         if self.save(record).is_ok() {
-            self.audit(json!({ "kind": "status", "binding": binding, "status": status, "why": why }));
+            self.audit(
+                json!({ "kind": "status", "binding": binding, "status": status, "why": why }),
+            );
         }
     }
 
@@ -676,8 +771,15 @@ impl Signer {
             {
                 return Ok(token.clone());
             }
-            let record = state.bindings.get(binding).ok_or(MintRefused::UnknownBinding)?;
-            let installation = record.installation.as_ref().map(|i| i.id).ok_or(MintRefused::NotInstalled)?;
+            let record = state
+                .bindings
+                .get(binding)
+                .ok_or(MintRefused::UnknownBinding)?;
+            let installation = record
+                .installation
+                .as_ref()
+                .map(|i| i.id)
+                .ok_or(MintRefused::NotInstalled)?;
             (installation, record.account.clone())
         };
         let jwt = self.app_jwt(binding)?;
@@ -697,7 +799,9 @@ impl Signer {
                 .get("token")
                 .and_then(Value::as_str)
                 .map(Secret::new)
-                .ok_or_else(|| MintRefused::Store("GitHub's token answer had no token".to_string()))?;
+                .ok_or_else(|| {
+                    MintRefused::Store("GitHub's token answer had no token".to_string())
+                })?;
             self.lock()
                 .installation_tokens
                 .insert(binding.to_string(), (token.clone(), now + TOKEN_USE_MS));
@@ -706,11 +810,14 @@ impl Signer {
         let why = answer.why();
         let lower = why.to_ascii_lowercase();
         if answer.status == 403 && lower.contains("suspend") {
-            let text = format!("The App's installation in {account} is suspended on GitHub ({why}).");
+            let text =
+                format!("The App's installation in {account} is suspended on GitHub ({why}).");
             self.mark(binding, Status::Suspended, &text);
             return Err(MintRefused::Suspended { why: text });
         }
-        if answer.status == 401 && (lower.contains("exp") || lower.contains("iat") || lower.contains("time")) {
+        if answer.status == 401
+            && (lower.contains("exp") || lower.contains("iat") || lower.contains("time"))
+        {
             return Err(MintRefused::GitHub {
                 status: Some(401),
                 why: format!("{why}. This machine's clock may be wrong."),
@@ -724,9 +831,13 @@ impl Signer {
                 .await
                 .map_err(transport)?;
             let text = if app.ok() {
-                format!("The App was uninstalled from {account} on GitHub, so it mints nothing. Install it again from its page, or connect again.")
+                format!(
+                    "The App was uninstalled from {account} on GitHub, so it mints nothing. Install it again from its page, or connect again."
+                )
             } else {
-                format!("GitHub no longer knows the App for {account} or its key: it was deleted. Connect again to go on.")
+                format!(
+                    "GitHub no longer knows the App for {account} or its key: it was deleted. Connect again to go on."
+                )
             };
             self.mark(binding, Status::Revoked, &text);
             return Err(MintRefused::Revoked { why: text });
@@ -737,7 +848,10 @@ impl Signer {
     /// The Actions service connection of an App binding: a registration token from the installation token, exchanged at
     /// GitHub's runner-registration call for the service's address and admin token. Kept until five minutes before it
     /// ends. In-process only.
-    pub async fn actions_connection(&self, binding: &str) -> Result<ActionsConnection, MintRefused> {
+    pub async fn actions_connection(
+        &self,
+        binding: &str,
+    ) -> Result<ActionsConnection, MintRefused> {
         let now = self.now();
         let account = {
             let state = self.lock();
@@ -746,7 +860,10 @@ impl Signer {
             {
                 return Ok(connection.clone());
             }
-            let record = state.bindings.get(binding).ok_or(MintRefused::UnknownBinding)?;
+            let record = state
+                .bindings
+                .get(binding)
+                .ok_or(MintRefused::UnknownBinding)?;
             match record.mode {
                 Mode::App => {}
                 Mode::Oauth => return Err(MintRefused::NotMintable),
@@ -764,7 +881,9 @@ impl Signer {
         let answer = http
             .send(
                 Method::POST,
-                &http.api(&format!("/orgs/{account}/actions/runners/registration-token")),
+                &http.api(&format!(
+                    "/orgs/{account}/actions/runners/registration-token"
+                )),
                 Auth::Bearer(&token),
                 None,
             )
@@ -778,7 +897,9 @@ impl Signer {
             .get("token")
             .and_then(Value::as_str)
             .map(Secret::new)
-            .ok_or_else(|| MintRefused::Store("GitHub's registration answer had no token".to_string()))?;
+            .ok_or_else(|| {
+                MintRefused::Store("GitHub's registration answer had no token".to_string())
+            })?;
         let answer = http
             .send(
                 Method::POST,
@@ -795,13 +916,14 @@ impl Signer {
         let service_url = body
             .get("url")
             .and_then(Value::as_str)
-            .ok_or_else(|| MintRefused::Store("GitHub's runner service answer had no address".to_string()))?
+            .ok_or_else(|| {
+                MintRefused::Store("GitHub's runner service answer had no address".to_string())
+            })?
             .trim_end_matches('/')
             .to_string();
-        let admin = body
-            .get("token")
-            .and_then(Value::as_str)
-            .ok_or_else(|| MintRefused::Store("GitHub's runner service answer had no token".to_string()))?;
+        let admin = body.get("token").and_then(Value::as_str).ok_or_else(|| {
+            MintRefused::Store("GitHub's runner service answer had no token".to_string())
+        })?;
         let ends = jwt_expiry_ms(admin).unwrap_or(now + 60 * 60 * 1000);
         let connection = ActionsConnection {
             service_url,
@@ -851,7 +973,10 @@ impl Signer {
                 line["outcome"] = json!("refused");
                 line["refusal"] = json!(refused.code());
                 line["why"] = json!(refused.message());
-                if let MintRefused::ScaleSetOutsideGroup { scale_set_group, .. } = refused {
+                if let MintRefused::ScaleSetOutsideGroup {
+                    scale_set_group, ..
+                } = refused
+                {
                     line["scaleSetRunnerGroupId"] = json!(scale_set_group);
                 }
             }
@@ -877,7 +1002,8 @@ impl Signer {
             })?;
         let mint_id = loop {
             let mut bytes = [0u8; 8];
-            getrandom::fill(&mut bytes).map_err(|_| MintRefused::Store("no random number".to_string()))?;
+            getrandom::fill(&mut bytes)
+                .map_err(|_| MintRefused::Store("no random number".to_string()))?;
             let id = u64::from_le_bytes(bytes) >> 11;
             if id != 0 {
                 break id;
@@ -896,7 +1022,10 @@ impl Signer {
                     Status::AwaitingInstall => return Err(MintRefused::NotInstalled),
                     Status::Active | Status::Suspended => {}
                 }
-                let work_folder = request.work_folder.clone().unwrap_or_else(|| "_work".to_string());
+                let work_folder = request
+                    .work_folder
+                    .clone()
+                    .unwrap_or_else(|| "_work".to_string());
                 let http = &self.inner.http;
                 let group = binding.runner_group.as_ref().map(|group| group.id);
                 let (answer, config_key) = match request.scale_set_id {
@@ -922,7 +1051,8 @@ impl Signer {
                             }
                             return Err(github(&read));
                         }
-                        let scale_set_group = read.json().get("runnerGroupId").and_then(Value::as_u64);
+                        let scale_set_group =
+                            read.json().get("runnerGroupId").and_then(Value::as_u64);
                         if group.is_none() || scale_set_group != group {
                             return Err(MintRefused::ScaleSetOutsideGroup {
                                 scale_set,
@@ -986,7 +1116,11 @@ impl Signer {
                 let config = body
                     .get(config_key)
                     .and_then(Value::as_str)
-                    .ok_or_else(|| MintRefused::Store("GitHub's answer had no runner configuration".to_string()))?;
+                    .ok_or_else(|| {
+                        MintRefused::Store(
+                            "GitHub's answer had no runner configuration".to_string(),
+                        )
+                    })?;
                 if binding.status == Status::Suspended {
                     let mut record = binding.clone();
                     record.status = Status::Active;
@@ -996,7 +1130,10 @@ impl Signer {
                 }
                 Ok(Minted {
                     mint_id,
-                    runner_id: body.pointer("/runner/id").and_then(Value::as_u64).unwrap_or(0),
+                    runner_id: body
+                        .pointer("/runner/id")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0),
                     runner_name: body
                         .pointer("/runner/name")
                         .and_then(Value::as_str)
@@ -1018,7 +1155,10 @@ impl Signer {
     // ---- Push -------------------------------------------------------------------------------------------------------
 
     fn intake_digest_path(&self, binding: &str) -> std::path::PathBuf {
-        self.inner.dir.join("intake").join(format!("{binding}.sha256"))
+        self.inner
+            .dir
+            .join("intake")
+            .join(format!("{binding}.sha256"))
     }
 
     fn queue_dir(&self, binding: &str) -> std::path::PathBuf {
@@ -1034,15 +1174,26 @@ impl Signer {
     ) -> Result<(Binding, Secret), SignerError> {
         check_account(account)?;
         if label_sets.is_empty() || label_sets.len() > 10 {
-            return Err(SignerError::Invalid("labels: one to ten label sets".to_string()));
+            return Err(SignerError::Invalid(
+                "labels: one to ten label sets".to_string(),
+            ));
         }
         let label_sets = label_sets
             .iter()
             .map(|set| check_labels("labels", set))
             .collect::<Result<Vec<_>, _>>()?;
         let id = fresh_id("gh-")?;
-        let token = Secret::new(format!("arcaintake_{}{}{}{}", fresh_id("")?, fresh_id("")?, fresh_id("")?, fresh_id("")?));
-        write_private(&self.intake_digest_path(&id), hex_sha256(token.expose()).as_bytes())?;
+        let token = Secret::new(format!(
+            "arcaintake_{}{}{}{}",
+            fresh_id("")?,
+            fresh_id("")?,
+            fresh_id("")?,
+            fresh_id("")?
+        ));
+        write_private(
+            &self.intake_digest_path(&id),
+            hex_sha256(token.expose()).as_bytes(),
+        )?;
         let now = self.now();
         let binding = Binding {
             id: id.clone(),
@@ -1072,12 +1223,22 @@ impl Signer {
     }
 
     /// Takes one pushed configuration for a push binding. `presented` is the bearer the caller sent.
-    pub fn intake(&self, binding: &str, presented: &str, body: &Value) -> Result<usize, IntakeRefused> {
+    pub fn intake(
+        &self,
+        binding: &str,
+        presented: &str,
+        body: &Value,
+    ) -> Result<usize, IntakeRefused> {
         let not_found = || IntakeRefused {
             status: 404,
             why: "no push connection of that id".to_string(),
         };
-        let record = self.lock().bindings.get(binding).cloned().ok_or_else(not_found)?;
+        let record = self
+            .lock()
+            .bindings
+            .get(binding)
+            .cloned()
+            .ok_or_else(not_found)?;
         if record.mode != Mode::Push {
             return Err(not_found());
         }
@@ -1107,12 +1268,19 @@ impl Signer {
             .filter(|config| !config.is_empty() && config.len() <= PUSHED_BYTES)
             .ok_or_else(|| IntakeRefused {
                 status: 400,
-                why: "encodedJitConfig: GitHub's encoded_jit_config, as a string of at most 64 KiB".to_string(),
+                why: "encodedJitConfig: GitHub's encoded_jit_config, as a string of at most 64 KiB"
+                    .to_string(),
             })?;
         let labels: Vec<String> = body
             .get("labels")
             .and_then(Value::as_array)
-            .map(|labels| labels.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .map(|labels| {
+                labels
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
             .unwrap_or_default();
         let labels = record
             .label_sets
@@ -1133,7 +1301,9 @@ impl Signer {
             })?;
         let facts = jit_facts(config);
         let folder = self.queue_dir(binding);
-        let queued = fs::read_dir(&folder).map(|entries| entries.count()).unwrap_or(0);
+        let queued = fs::read_dir(&folder)
+            .map(|entries| entries.count())
+            .unwrap_or(0);
         if queued >= PUSHED_MAX {
             return Err(IntakeRefused {
                 status: 429,
@@ -1143,7 +1313,10 @@ impl Signer {
         let now = self.now();
         let name = format!(
             "{now:015}-{}.json",
-            fresh_id("").map_err(|error| IntakeRefused { status: 500, why: error.message() })?
+            fresh_id("").map_err(|error| IntakeRefused {
+                status: 500,
+                why: error.message()
+            })?
         );
         let entry = json!({
             "receivedAt": now,
@@ -1153,8 +1326,12 @@ impl Signer {
             "runnerId": facts.get("id").cloned(),
             "poolId": facts.get("pool").cloned(),
         });
-        write_private(&folder.join(name), entry.to_string().as_bytes())
-            .map_err(|error| IntakeRefused { status: 500, why: error.message() })?;
+        write_private(&folder.join(name), entry.to_string().as_bytes()).map_err(|error| {
+            IntakeRefused {
+                status: 500,
+                why: error.message(),
+            }
+        })?;
         self.audit(json!({
             "kind": "intake",
             "binding": binding,
@@ -1166,7 +1343,12 @@ impl Signer {
         Ok(queued + 1)
     }
 
-    fn pop_pushed(&self, binding: &Binding, labels: &[String], mint_id: u64) -> Result<Minted, MintRefused> {
+    fn pop_pushed(
+        &self,
+        binding: &Binding,
+        labels: &[String],
+        mint_id: u64,
+    ) -> Result<Minted, MintRefused> {
         if binding.status == Status::Revoked {
             return Err(MintRefused::Revoked {
                 why: binding.why.clone().unwrap_or_default(),
@@ -1186,7 +1368,9 @@ impl Signer {
         let now = self.now();
         for name in names {
             let path = folder.join(&name);
-            let Ok(text) = fs::read_to_string(&path) else { continue };
+            let Ok(text) = fs::read_to_string(&path) else {
+                continue;
+            };
             let Ok(entry) = serde_json::from_str::<Value>(&text) else {
                 let _ = fs::remove_file(&path);
                 continue;
@@ -1200,7 +1384,13 @@ impl Signer {
             let entry_labels: Vec<String> = entry
                 .get("labels")
                 .and_then(Value::as_array)
-                .map(|labels| labels.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
                 .unwrap_or_default();
             if !same_labels(&entry_labels, labels) {
                 continue;
@@ -1208,7 +1398,9 @@ impl Signer {
             if fs::remove_file(&path).is_err() {
                 continue;
             }
-            let Some(config) = entry.get("encodedJitConfig").and_then(Value::as_str) else { continue };
+            let Some(config) = entry.get("encodedJitConfig").and_then(Value::as_str) else {
+                continue;
+            };
             return Ok(Minted {
                 mint_id,
                 runner_id: entry.get("runnerId").and_then(Value::as_u64).unwrap_or(0),
@@ -1231,17 +1423,27 @@ impl Signer {
     /// its key is deleted; a push binding's token and queue are deleted; an OAuth binding's runner files are deleted.
     /// Answers the binding as it now is.
     pub async fn revoke(&self, id: &str, caller: &str) -> Result<Binding, SignerError> {
-        let mut binding = self.lock().bindings.get(id).cloned().ok_or(SignerError::UnknownBinding)?;
+        let mut binding = self
+            .lock()
+            .bindings
+            .get(id)
+            .cloned()
+            .ok_or(SignerError::UnknownBinding)?;
         let mut said = format!("Disconnected in Arca by {caller}.");
         match binding.mode {
             Mode::App => {
-                if let (Some(installation), Ok(jwt)) = (binding.installation.as_ref(), self.app_jwt(id)) {
+                if let (Some(installation), Ok(jwt)) =
+                    (binding.installation.as_ref(), self.app_jwt(id))
+                {
                     let answer = self
                         .inner
                         .http
                         .send(
                             Method::DELETE,
-                            &self.inner.http.api(&format!("/app/installations/{}", installation.id)),
+                            &self
+                                .inner
+                                .http
+                                .api(&format!("/app/installations/{}", installation.id)),
                             Auth::Bearer(&jwt),
                             None,
                         )
@@ -1328,7 +1530,10 @@ fn jit_facts(encoded: &str) -> serde_json::Map<String, Value> {
         .and_then(Value::as_str)
         .and_then(|text| STANDARD.decode(text).ok())
         .and_then(|bytes| {
-            let bytes = bytes.strip_prefix(b"\xef\xbb\xbf".as_slice()).unwrap_or(&bytes).to_vec();
+            let bytes = bytes
+                .strip_prefix(b"\xef\xbb\xbf".as_slice())
+                .unwrap_or(&bytes)
+                .to_vec();
             serde_json::from_slice::<Value>(&bytes).ok()
         })
     else {
@@ -1365,7 +1570,10 @@ mod tests {
     #[test]
     fn a_jwts_expiry_is_read_for_renewal_only() {
         let payload = URL_SAFE_NO_PAD.encode(br#"{"exp":1700000000}"#);
-        assert_eq!(jwt_expiry_ms(&format!("h.{payload}.s")), Some(1_700_000_000_000));
+        assert_eq!(
+            jwt_expiry_ms(&format!("h.{payload}.s")),
+            Some(1_700_000_000_000)
+        );
         assert_eq!(jwt_expiry_ms("opaque"), None);
     }
 }

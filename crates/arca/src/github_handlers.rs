@@ -67,8 +67,14 @@ fn job_of(value: Option<&Value>) -> Option<JobRef> {
         repo: value.get("repo")?.as_str()?.to_string(),
         run_id: value.get("runId").and_then(Value::as_u64),
         job_id: value.get("jobId").and_then(Value::as_u64),
-        job_name: value.get("jobName").and_then(Value::as_str).map(str::to_string),
-        workflow_ref: value.get("workflowRef").and_then(Value::as_str).map(str::to_string),
+        job_name: value
+            .get("jobName")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        workflow_ref: value
+            .get("workflowRef")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -91,7 +97,9 @@ fn runtime() -> Result<tokio::runtime::Handle, CallError> {
 }
 
 fn json_of<T: serde::Serialize>(value: &T) -> Result<Value, CallError> {
-    serde_json::to_value(value).map_err(|_| CallError::Internal("a GitHub record could not be written as JSON".to_string()))
+    serde_json::to_value(value).map_err(|_| {
+        CallError::Internal("a GitHub record could not be written as JSON".to_string())
+    })
 }
 
 impl ToolHandler for GithubHandler {
@@ -111,10 +119,15 @@ impl ToolHandler for GithubHandler {
                     .get("runners")
                     .and_then(Value::as_u64)
                     .and_then(|n| u32::try_from(n).ok())
-                    .ok_or_else(|| CallError::Invalid("runners: a whole number is required".to_string()))?;
+                    .ok_or_else(|| {
+                        CallError::Invalid("runners: a whole number is required".to_string())
+                    })?;
                 let request = OauthRequest {
                     account: text(&args, "org")?.to_string(),
-                    group: args.get("group").and_then(Value::as_str).map(str::to_string),
+                    group: args
+                        .get("group")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                     labels,
                     runners,
                     name_prefix: args
@@ -135,10 +148,14 @@ impl ToolHandler for GithubHandler {
             }
             "github_connect_status" => {
                 let id = text(&args, "id")?;
-                let flow = self.signer.oauth_flow(id).ok_or_else(|| CallError::Refused {
-                    code: "UnknownFlow".to_string(),
-                    message: "no device flow of the last day has that id on this node".to_string(),
-                })?;
+                let flow = self
+                    .signer
+                    .oauth_flow(id)
+                    .ok_or_else(|| CallError::Refused {
+                        code: "UnknownFlow".to_string(),
+                        message: "no device flow of the last day has that id on this node"
+                            .to_string(),
+                    })?;
                 json_of(&flow)
             }
             "github_bindings" => Ok(json!({
@@ -158,7 +175,10 @@ impl ToolHandler for GithubHandler {
                     binding: text(&args, "binding")?.to_string(),
                     runner_name: text(&args, "runnerName")?.to_string(),
                     labels: strings(&args, "labels")?,
-                    work_folder: args.get("workFolder").and_then(Value::as_str).map(str::to_string),
+                    work_folder: args
+                        .get("workFolder")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                     scale_set_id: args.get("scaleSetId").and_then(Value::as_u64),
                     job: job_of(args.get("job")),
                     caller: caller.token_id.clone(),
@@ -183,12 +203,12 @@ impl ToolHandler for GithubHandler {
                 }
             }
             "github_mint_job" => {
-                let mint_id = args
-                    .get("mintId")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| CallError::Invalid("mintId: a whole number is required".to_string()))?;
-                let job = job_of(args.get("job"))
-                    .ok_or_else(|| CallError::Invalid("job.repo: a string is required".to_string()))?;
+                let mint_id = args.get("mintId").and_then(Value::as_u64).ok_or_else(|| {
+                    CallError::Invalid("mintId: a whole number is required".to_string())
+                })?;
+                let job = job_of(args.get("job")).ok_or_else(|| {
+                    CallError::Invalid("job.repo: a string is required".to_string())
+                })?;
                 self.signer.attach_job(mint_id, &job);
                 Ok(json!({ "ok": true }))
             }

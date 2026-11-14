@@ -24,7 +24,7 @@ use reqwest::Method;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::github_api::{Answer, Auth, RunnerKey, Secret, ACTIONS_API_VERSION};
+use crate::github_api::{ACTIONS_API_VERSION, Answer, Auth, RunnerKey, Secret};
 use crate::github_signer::{
     Binding, Mode, RegisteredRunner, RunnerGroup, Signer, SignerError, Status, check_account,
     check_labels, fresh_id, write_private,
@@ -161,7 +161,8 @@ impl Signer {
             }
             Some(_) => {
                 return Err(StartError::Signer(SignerError::Invalid(
-                    "namePrefix: at most 50 letters, digits, dots, hyphens and underscores".to_string(),
+                    "namePrefix: at most 50 letters, digits, dots, hyphens and underscores"
+                        .to_string(),
                 )));
             }
         };
@@ -185,7 +186,10 @@ impl Signer {
             return Err(StartError::GitHub(oauth_why(&answer)));
         };
         let now = self.now();
-        let expires_in = body.get("expires_in").and_then(Value::as_u64).unwrap_or(900);
+        let expires_in = body
+            .get("expires_in")
+            .and_then(Value::as_u64)
+            .unwrap_or(900);
         let interval = body.get("interval").and_then(Value::as_u64).unwrap_or(5);
         let flow = OauthFlow {
             id: id.clone(),
@@ -279,7 +283,10 @@ impl Signer {
     async fn oauth_follow(&self, id: &str) {
         let Some(client_id) = self.oauth_client_id() else {
             self.lock().device_codes.remove(id);
-            self.fail(id, "This node's OAuth App was removed while waiting.".to_string());
+            self.fail(
+                id,
+                "This node's OAuth App was removed while waiting.".to_string(),
+            );
             return;
         };
         loop {
@@ -335,7 +342,11 @@ impl Signer {
                     true,
                     format!(
                         "You authorised Arca on GitHub (scope {}). Arca uses it once now.",
-                        if granted_scopes.is_empty() { OAUTH_SCOPE } else { &granted_scopes }
+                        if granted_scopes.is_empty() {
+                            OAUTH_SCOPE
+                        } else {
+                            &granted_scopes
+                        }
                     ),
                 );
                 self.audit(json!({ "kind": "oauthGranted", "flow": id, "scope": granted_scopes }));
@@ -348,7 +359,11 @@ impl Signer {
                         self.audit(connect);
                         self.set_flow(id, |flow| flow.state = FlowState::Done);
                         if deleted {
-                            self.step(id, true, "Done. Arca holds no access to your organisation.".to_string());
+                            self.step(
+                                id,
+                                true,
+                                "Done. Arca holds no access to your organisation.".to_string(),
+                            );
                         } else {
                             self.step(
                                 id,
@@ -376,7 +391,8 @@ impl Signer {
                     self.lock().device_codes.remove(id);
                     self.fail(
                         id,
-                        "You declined on GitHub. Nothing was registered and Arca has no access.".to_string(),
+                        "You declined on GitHub. Nothing was registered and Arca has no access."
+                            .to_string(),
                     );
                     return;
                 }
@@ -391,7 +407,10 @@ impl Signer {
                 }
                 // GitHub is busy or answered something that is not the flow's (a 5xx, a 429, a page that is not
                 // JSON): ask again, more slowly, as long as the code lives.
-                _ if answer.status >= 500 || answer.status == 429 || body.get("error").is_none() => {
+                _ if answer.status >= 500
+                    || answer.status == 429
+                    || body.get("error").is_none() =>
+                {
                     if answer.status == 429 {
                         self.set_flow(id, |flow| flow.interval_ms += 5000);
                     }
@@ -400,7 +419,10 @@ impl Signer {
                     self.lock().device_codes.remove(id);
                     self.fail(
                         id,
-                        format!("GitHub stopped the sign-in: {}. Nothing was registered.", oauth_why(&answer)),
+                        format!(
+                            "GitHub stopped the sign-in: {}. Nothing was registered.",
+                            oauth_why(&answer)
+                        ),
                     );
                     return;
                 }
@@ -428,7 +450,10 @@ impl Signer {
             .http
             .send(
                 Method::DELETE,
-                &self.inner.http.api(&format!("/applications/{client_id}/grant")),
+                &self
+                    .inner
+                    .http
+                    .api(&format!("/applications/{client_id}/grant")),
                 Auth::Basic(client_id, &secret),
                 Some(&json!({ "access_token": grant.expose() })),
             )
@@ -440,7 +465,8 @@ impl Signer {
                 self.step(
                     id,
                     true,
-                    "The grant is deleted on GitHub: Arca can no longer act on your organisation.".to_string(),
+                    "The grant is deleted on GitHub: Arca can no longer act on your organisation."
+                        .to_string(),
                 );
                 self.audit(json!({ "kind": "grantDeleted", "flow": id, "ok": true, "status": answer.status }));
                 true
@@ -514,10 +540,16 @@ impl Signer {
             .and_then(Value::as_str)
             .map(Secret::new)
             .ok_or("GitHub's registration token answer had no token")?;
-        self.step(id, true, format!("GitHub gave a runner registration token for {org}."));
+        self.step(
+            id,
+            true,
+            format!("GitHub gave a runner registration token for {org}."),
+        );
 
         // 2. The runner group.
-        let group = self.oauth_group(id, &org, flow.group.as_deref(), grant).await?;
+        let group = self
+            .oauth_group(id, &org, flow.group.as_deref(), grant)
+            .await?;
 
         // 3. The Actions service for the organisation.
         let answer = http
@@ -714,13 +746,21 @@ impl Signer {
             self.step(
                 id,
                 true,
-                format!("The runners go into the default runner group \"{}\".", group.name),
+                format!(
+                    "The runners go into the default runner group \"{}\".",
+                    group.name
+                ),
             );
             return Ok(group);
         };
         if let Some(group) = groups
             .iter()
-            .find(|group| group.get("name").and_then(Value::as_str).is_some_and(|known| known.eq_ignore_ascii_case(name)))
+            .find(|group| {
+                group
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|known| known.eq_ignore_ascii_case(name))
+            })
             .and_then(|group| group_of(group, false, None))
         {
             self.step(
@@ -744,14 +784,21 @@ impl Signer {
             .await
             .map_err(|why| format!("Arca could not make the runner group: {why}."))?;
         if !answer.ok() {
-            return Err(refused(&format!("make the runner group \"{name}\""), &answer));
+            return Err(refused(
+                &format!("make the runner group \"{name}\""),
+                &answer,
+            ));
         }
         let warning = "Arca made this group open to every private repository of the organisation, public ones off. \
             To narrow it, choose selected repositories in the group's settings on GitHub."
             .to_string();
         let group = group_of(&answer.json(), true, Some(warning.clone()))
             .ok_or("GitHub's answer for the new runner group had no id")?;
-        self.step(id, true, format!("Arca made the runner group \"{}\". {warning}", group.name));
+        self.step(
+            id,
+            true,
+            format!("Arca made the runner group \"{}\". {warning}", group.name),
+        );
         Ok(group)
     }
 
@@ -767,7 +814,9 @@ impl Signer {
             .http
             .send(
                 Method::GET,
-                &format!("{service_url}/_apis/distributedtask/pools?api-version={ACTIONS_API_VERSION}"),
+                &format!(
+                    "{service_url}/_apis/distributedtask/pools?api-version={ACTIONS_API_VERSION}"
+                ),
                 Auth::Bearer(admin),
                 None,
             )
@@ -789,7 +838,12 @@ impl Signer {
                     .is_some_and(|name| name.eq_ignore_ascii_case(&group.name))
             })
             .and_then(|pool| pool.get("id").and_then(Value::as_u64))
-            .ok_or_else(|| format!("GitHub's runner service has no group named \"{}\".", group.name))
+            .ok_or_else(|| {
+                format!(
+                    "GitHub's runner service has no group named \"{}\".",
+                    group.name
+                )
+            })
     }
 
     /// Registers one runner and writes its three files. `Ok` is GitHub's runner id.
@@ -851,9 +905,10 @@ impl Signer {
                     .filter(|value| !value.is_empty())
                     .map(str::to_string)
             };
-            let client_id = text("client_id").ok_or("GitHub's registration answer had no client id")?;
-            let authorization_url =
-                text("authorization_url").ok_or("GitHub's registration answer had no token address")?;
+            let client_id =
+                text("client_id").ok_or("GitHub's registration answer had no client id")?;
+            let authorization_url = text("authorization_url")
+                .ok_or("GitHub's registration answer had no token address")?;
             let server_url_v2 = text("server_url").unwrap_or_default();
             let mut data = json!({
                 "clientId": client_id,
@@ -877,7 +932,11 @@ impl Signer {
                 "useRunnerAdminFlow": true,
                 "serverUrlV2": server_url_v2,
             });
-            (runner_id, runner_file, json!({ "scheme": "OAuth", "data": data }))
+            (
+                runner_id,
+                runner_file,
+                json!({ "scheme": "OAuth", "data": data }),
+            )
         } else {
             let answer = http
                 .send(
@@ -964,7 +1023,11 @@ impl Signer {
 /// restricts OAuth Apps, what the person does.
 fn refused(what: &str, answer: &Answer) -> String {
     let why = answer.why();
-    if answer.status == 403 && why.to_ascii_lowercase().contains("oauth app access restrictions") {
+    if answer.status == 403
+        && why
+            .to_ascii_lowercase()
+            .contains("oauth app access restrictions")
+    {
         return format!("Arca could not {what}. {RESTRICTED}");
     }
     format!("Arca could not {what}: {why}.")
