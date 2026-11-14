@@ -188,11 +188,18 @@ test('the Fleet view is one click from the top bar, round-trips #fleet, and stay
   // Dark mode renders the same table on the dark tokens.
   await fresh.goto(`${base}#fleet`);
   await fresh.locator('.arca-fleet-row').first().waitFor();
-  const background = () => fresh.locator('.arca-fleet-card').evaluate((node) => getComputedStyle(node).backgroundColor);
+  // The page polls every 50 ms and each snapshot rebuilds the card, so the card is found and read in one call: a node
+  // found in one call can be detached by the next, and a detached node has no computed colour.
+  const background = () => fresh.evaluate(() => {
+    const card = document.querySelector('.arca-fleet-card');
+    return card ? getComputedStyle(card).backgroundColor : '';
+  });
   await fresh.emulateMedia({ colorScheme: 'light' });
   const light = await background();
   await fresh.emulateMedia({ colorScheme: 'dark' });
   const dark = await background();
+  assert.ok(light, 'the light card has a colour');
+  assert.ok(dark, 'the dark card has a colour');
   assert.notEqual(light, dark, 'the card follows the colour scheme');
   assert.equal(await fresh.locator('.arca-fleet-row').count(), 4);
 
