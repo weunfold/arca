@@ -7,6 +7,12 @@ What changed in each release of Automagik Arca, in plain words. The newest relea
 <!-- The release writes the next section here by itself: one line per change that landed, from its commit subject.
 Write under this comment only what a reader needs beyond those lines; the release puts its heading above it. -->
 
+`images/github-runner/` builds GitHub's `ubuntu-latest` runner image as an Incus virtual-machine image from GitHub's
+own scripts (actions/runner-images, pinned to one release per Ubuntu line, 24.04 and 26.04), with the runner program,
+the `runner` user, GitHub's environment and a filled toolcache inside, and one just-in-time job per machine.
+`check-release.sh` follows GitHub's releases; each build publishes what differs from GitHub's image in
+`docs/runner-image/<tag>/`; `compat/` runs the same jobs on GitHub's runner and ours and compares them.
+
 `service_update` now moves a running container service made from a local image pinned by fingerprint, as it already
 moves one made from an image by digest on a registry: the call's `digest` is the new image's fingerprint, the image
 must already be in the service project's image store, the record takes the alias the installed template pins it under
