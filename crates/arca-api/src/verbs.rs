@@ -83,7 +83,7 @@ impl Verb {
     }
 }
 
-static VERBS: [Verb; 69] = [
+static VERBS: [Verb; 70] = [
     Verb {
         name: "arca_status",
         summary: "Node status: the API version, the node id, the mode, the uptime, whether Incus answers and the last applied sequence number.",
@@ -1055,6 +1055,20 @@ static VERBS: [Verb; 69] = [
         params: instance_move_preflight_params,
         result: instance_move_preflight_result,
     },
+    Verb {
+        name: "os_update",
+        summary: "The node's OS update state: the version, channel, check frequency, automatic updates, the last check and update, and the OS's own error kind and update-key trust. Read every 5 minutes; known is false on a node that is not Arca OS.",
+        class: VerbClass::L,
+        min_scope: Scope::Viewer,
+        writes: false,
+        destructive: false,
+        untrusted: true,
+        output_key: None,
+        summary_text: summary_os_update,
+        cut: no_cut,
+        params: os_update_params,
+        result: os_update_result,
+    },
 ];
 
 /// The checks of every `instance_move_preflight` row, in the order each row lists them.
@@ -1908,6 +1922,18 @@ pub fn summary_status(v: &Value) -> String {
     )
 }
 
+/// A short line for a successful `os_update`: the version and channel, or that the node reports no update state.
+pub fn summary_os_update(v: &Value) -> String {
+    if v["known"].as_bool() != Some(true) {
+        return "this node does not report update state".to_string();
+    }
+    format!(
+        "OS {} on channel {}",
+        v["version"].as_str().unwrap_or("unknown"),
+        v["channel"].as_str().unwrap_or("unknown")
+    )
+}
+
 /// A short line for a successful `node_metrics`.
 pub fn summary_metrics(v: &Value) -> String {
     format!("host metrics for {} minute(s)", v["minutes"])
@@ -2315,6 +2341,48 @@ fn node_metrics_result() -> Value {
         ("minutes", true, int()),
         ("latest", true, nullable(host_sample())),
         ("mean", true, nullable(host_sample())),
+    ])
+}
+
+fn os_update_params() -> Value {
+    params(vec![])
+}
+
+fn os_update_result() -> Value {
+    let text = || nullable(string());
+    let ms = || nullable(int());
+    result(vec![
+        ("known", true, boolean()),
+        ("asOf", true, int()),
+        ("version", true, text()),
+        ("channel", true, text()),
+        ("checkFrequency", true, text()),
+        ("automatic", true, nullable(boolean())),
+        ("lastCheckAt", true, ms()),
+        ("lastSuccessAt", true, ms()),
+        ("lastUpdatedVersion", true, text()),
+        ("lastUpdatedAt", true, ms()),
+        ("needsReboot", true, nullable(boolean())),
+        ("pendingVersion", true, text()),
+        ("previousVersion", true, text()),
+        ("goodVersion", true, text()),
+        ("lastResult", true, text()),
+        ("lastReason", true, text()),
+        (
+            "lastErrorKind",
+            true,
+            nullable_enum(&["network", "parse", "signature", "trust", "other"]),
+        ),
+        (
+            "trust",
+            true,
+            nullable(result(vec![
+                ("embeddedCaFingerprint", true, text()),
+                ("presentedCaFingerprint", true, text()),
+                ("failures", true, nullable(at_least(0))),
+                ("escalated", true, nullable(boolean())),
+            ])),
+        ),
     ])
 }
 

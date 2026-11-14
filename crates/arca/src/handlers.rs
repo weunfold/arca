@@ -26,7 +26,7 @@ use arca_kernel::ownership::ObjectRef;
 use arca_kernel::plugin::EffectRefusal;
 use arca_mcp::{CallError, Caller, GetHandler, GetReply, TokenStore, ToolHandler};
 use arca_metrics::{
-    DEFAULT_MINUTES, HostModeChoice, HostSample, MODE_PROBE_TIMEOUT, ModeRetry, Sampler,
+    DEFAULT_MINUTES, HostModeChoice, HostSample, MODE_PROBE_TIMEOUT, ModeRetry, OsUpdate, Sampler,
     SamplerConfig, choose_host_mode, mean,
 };
 use arca_providers::ReadOnlyIncusProvider;
@@ -318,6 +318,25 @@ impl Published {
     }
 }
 
+/// The update state the sampler's newest incus-osd read gave, swapped in by each tick as [`Published`] swaps its samples, so
+/// `os_update` answers from the ~5 min reading and never sends a GET of its own. `None` before the first read.
+#[derive(Clone, Default)]
+pub struct OsUpdatePublished(Arc<RwLock<Option<Arc<OsUpdate>>>>);
+
+impl OsUpdatePublished {
+    pub fn publish(&self, state: OsUpdate) {
+        let next = Some(Arc::new(state));
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = next;
+    }
+
+    pub fn current(&self) -> Option<Arc<OsUpdate>> {
+        self.0
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
 /// The alert snapshot the sampler's tick last published, swapped in as [`Published`] swaps its samples. Before the first
 /// tick it is empty.
 #[derive(Clone, Default)]
@@ -344,6 +363,7 @@ pub struct Ticker<S: TickStore> {
     checks: Option<CheckTargets>,
     watch: Option<Arc<WatchHandler>>,
     host_network: Option<std::path::PathBuf>,
+    os_update: Option<OsUpdatePublished>,
 }
 
 impl<S: TickStore> Ticker<S> {
@@ -361,7 +381,14 @@ impl<S: TickStore> Ticker<S> {
             checks: None,
             watch: None,
             host_network: None,
+            os_update: None,
         }
+    }
+
+    /// The same ticker, which publishes the sampler's newest update state to `cell` on each tick, for `os_update`.
+    pub fn with_os_update(mut self, cell: OsUpdatePublished) -> Self {
+        self.os_update = Some(cell);
+        self
     }
 
     /// The same ticker, which reads the root part's status file at `path` on each tick and fills `Inputs.host_network` with
@@ -391,6 +418,9 @@ impl<S: TickStore> Ticker<S> {
         self.sampler.sample(now_ms);
         self.published
             .publish(self.sampler.history(HISTORY_MINUTES));
+        if let (Some(cell), Some(state)) = (&self.os_update, self.sampler.os_update()) {
+            cell.publish(state.clone());
+        }
         let mut inputs = inputs::from_sampler(&self.sampler);
         let swept = self.watch.as_ref().and_then(|handler| handler.newest());
         if let Some(targets) = &self.checks {
@@ -838,6 +868,24 @@ impl ToolHandler for MetricsHandler {
             minutes,
             now_ms(),
         ))
+    }
+}
+
+/// `os_update`: the node's OS update state, from the sampler's newest incus-osd read (every ~5 min). `node_metrics` is the host
+/// metrics domain, and its incus-osd reading is not part of the serialized sample; the update state changes on a slower cadence
+/// and has its own contract here. A node that is not Arca OS, a failed read, and the time before the first read are all
+/// `known: false`, never an error: the verb refuses nothing.
+pub struct OsUpdateHandler {
+    pub published: OsUpdatePublished,
+}
+
+impl ToolHandler for OsUpdateHandler {
+    fn call(&self, _args: Value, _caller: &Caller) -> Result<Value, CallError> {
+        let state = match self.published.current() {
+            Some(state) => serde_json::to_value(&*state),
+            None => serde_json::to_value(OsUpdate::unknown(now_ms())),
+        };
+        state.map_err(|_| CallError::Internal("the update state could not be written".to_string()))
     }
 }
 
@@ -2941,6 +2989,50 @@ mod tests {
                 metrics_row(snapshot.last(), &window_of(&snapshot, minutes), minutes, 9);
             assert_eq!(from_snapshot, node_metrics(&sampler, Some(minutes), 9));
         }
+    }
+
+    #[test]
+    fn os_update_answers_known_false_before_a_read_and_the_published_state_after() {
+        let caller = Caller {
+            token_id: "viewer".to_string(),
+            scope: Scope::Viewer,
+            tools: None,
+        };
+        let verb = arca_api::verb("os_update").expect("the verb is in the table");
+        assert_eq!(verb.min_scope, Scope::Viewer);
+        assert!(!verb.writes);
+        let schema = (verb.result)();
+        let published = OsUpdatePublished::default();
+        let handler = OsUpdateHandler {
+            published: published.clone(),
+        };
+        let before = handler.call(json!({}), &caller).expect("never a refusal");
+        assert_eq!(before["known"], json!(false));
+        assert_eq!(before["version"], Value::Null);
+        arca_api::conforms(&schema, &before).expect("the answer conforms");
+
+        let mut state = OsUpdate::unknown(42);
+        state.known = true;
+        state.version = Some("202611010000".to_string());
+        state.channel = Some("stable".to_string());
+        state.check_frequency = Some("6h".to_string());
+        state.automatic = Some(true);
+        state.last_error_kind = Some("trust".to_string());
+        state.trust = Some(arca_metrics::UpdateTrust {
+            embedded_ca_fingerprint: Some("AA:BB".to_string()),
+            presented_ca_fingerprint: Some("CC:DD".to_string()),
+            failures: Some(2),
+            escalated: Some(false),
+        });
+        published.publish(state);
+        let after = handler.call(json!({}), &caller).expect("never a refusal");
+        assert_eq!(after["known"], json!(true));
+        assert_eq!(after["asOf"], json!(42));
+        assert_eq!(after["version"], json!("202611010000"));
+        assert_eq!(after["lastErrorKind"], json!("trust"));
+        assert_eq!(after["trust"]["presentedCaFingerprint"], json!("CC:DD"));
+        assert_eq!(after["trust"]["failures"], json!(2));
+        arca_api::conforms(&schema, &after).expect("the answer conforms");
     }
 }
 
