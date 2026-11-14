@@ -4642,6 +4642,82 @@ managed network has created the bridge:
 `firewall-cmd --zone=trusted --change-interface=arcak-svcbr --permanent` and `firewall-cmd --reload`. Arca cannot do
 it: it holds no rights over the host firewall.
 
+## Routes: names for your instances, served by the node's edge
+
+A route gives an instance of this node a name a person types, for example `https://app.example.com`. Each node has one
+**edge**, a Caddy container made from the shipped `arca-edge` template, and every route of the node is a site on it. The
+edge gets each name its own certificate by the ACME DNS challenge through Cloudflare, so the name never has to be on the
+internet. Arca writes the edge's whole config from the routes: nothing in it is edited by hand, and the next route change
+replaces it.
+
+A route is kept in the edge's own desired-state record, so it is signed node state like the rest of the service:
+
+| Field | What it is |
+|-------|------------|
+| `hostname` | The name, lowercase, at least two labels, no wildcard. One route per name. |
+| `instance`, `project` | The Incus instance that answers, in any project of this node: an Arca service, or an instance Arca only knows (such as one in `default`). `project` defaults to the service project. |
+| `port` | The instance's tcp port. The edge speaks plain HTTP to it. |
+| `reach` | `private` (the default): only the local networks and the tailnet (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10) get through, every other address gets 403. `public`: no address filter. |
+| `address` | The instance's own IPv4 address, read from Incus when the route is added: the edge connects there. |
+
+### The edge
+
+1. **The address it listens on.** The template listens on port 443 of one host address that the node's config names
+   in `kernel.serviceListenAddresses`, as [A service port on one host address](#a-service-port-on-one-host-address)
+   explains, for example the node's own LAN address `198.51.100.7`. Its create therefore runs only from a proposal the
+   owner approves: `action_propose` with `{"action": "service_create", "args": {"name": "edge", "template":
+   "arca-edge"}}`.
+2. **Its Cloudflare token.** `service_secret_set` with `{"name": "edge", "key": "CLOUDFLARE_API_TOKEN", "value":
+   "<token>"}`. The token needs Zone, DNS, Edit on each zone whose names the edge serves. It is kept like every
+   template secret (a private file, and the container's environment).
+3. **Start it.** `instance_start` with `{"project": "arcak-svc", "instance": "edge"}`. Certificates are kept in its
+   data volume (`/data`), so an update keeps them.
+
+The edge's port device sends the PROXY protocol header (`proxy_protocol` on the Incus proxy device, set only for an
+edge), and Caddy reads each client's own address from it. Without it every visitor would come from the device's
+loopback and a private route could not tell the local network from the internet. The edge speaks HTTP/1.1 and HTTP/2
+(the device carries tcp, not the UDP of HTTP/3).
+
+### `route_add`, `route_remove`, `route_list`
+
+- **`route_add`** `{"hostname": "app.example.com", "instance": "web", "project": "default", "port": 8080}` (and
+  `"reach": "public"` for a name with no address filter). Arca reads the instance's address, records the route in the
+  edge's record, opens that address and port in the edge's firewall rules, writes the edge's Caddyfile and reloads
+  Caddy. A name that already has a route is pointed at the new instance and port: that is how a route is moved by hand.
+  It runs from a proposal the owner approves (its card names the address, the instance, the port, the reach in words and
+  the edge that serves it), or directly for a `doctor` token, as `service_connect` does.
+- **`route_remove`** `{"hostname": "app.example.com"}`: the site leaves the edge's config, Caddy is reloaded and the
+  edge's rules no longer open the instance's port for it. The instance is not touched.
+- **`route_list`** `{}` (viewer): every route, and the edge with the address a person reaches it on.
+
+The answer of a write says `applied` (the edge took the new config: it was written into the edge, and reloaded when the
+edge runs) and `reloaded` (Caddy reloaded it). An edge that is stopped gets the file and reads it when it starts. A config Caddy refuses keeps the old one serving: the route
+stays recorded, the answer says why, and the same `route_add` again, or the next route change, writes it once more.
+
+What the edge reaches:
+
+- **An instance outside Arca's projects** keeps its own firewall. Arca never writes in `default`: allow tcp to the
+  route's port from the edge's address (`route_list` shows it under `edge.ipv4`) in that instance's own ACL.
+- **An Arca service of this node** is reached through a link from the edge: run `service_connect` with `{"from":
+  "edge", "to": "<service>"}` first, and use the port the link opens (the service's first port).
+- An application that checks where requests come from (Home Assistant's `trusted_proxies`, for example) names the
+  edge's address.
+
+### Names
+
+The name must lead the person's machine to the edge. For a private route, point the name's `A` record at the address
+the edge listens on (a LAN address, or a tailnet address), not proxied by Cloudflare; the certificate comes by the DNS
+challenge whatever the record says. Until Arca writes these records itself, add them in the Cloudflare dashboard. To
+check a route before the record moves, ask the edge directly:
+
+```sh
+curl --resolve app.example.com:443:198.51.100.7 https://app.example.com/
+```
+
+A public name through a Cloudflare Tunnel ([Publishing a service through a Cloudflare
+Tunnel](#publishing-a-service-through-a-cloudflare-tunnel)) still points the tunnel's route at the service itself;
+routing the tunnel through the edge is a later step.
+
 ## Publishing a service through a Cloudflare Tunnel
 
 A Cloudflare Tunnel puts one of your services on the public internet under your own domain, for example

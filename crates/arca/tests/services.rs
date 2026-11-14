@@ -744,6 +744,7 @@ fn source_template(kind: &str, image: &str, digest: Option<&str>) -> service::Te
         setting_rules: Vec::new(),
         kernel_access: None,
         no_new_privileges: false,
+        edge: false,
         update: None,
     }
 }
@@ -2288,7 +2289,7 @@ fn refuses_to_read_or_remove_an_unmarked_instance_before_sending_a_log_or_delete
 }
 
 #[test]
-fn the_thirteen_templates_and_nothing_else_load_and_are_pinned() {
+fn the_fourteen_templates_and_nothing_else_load_and_are_pinned() {
     use std::path::Path;
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates");
     let mut names: Vec<String> = std::fs::read_dir(&dir)
@@ -2301,6 +2302,7 @@ fn the_thirteen_templates_and_nothing_else_load_and_are_pinned() {
     assert_eq!(
         names,
         vec![
+            "arca-edge",
             "automagik",
             "automagik-server",
             "automagik-workspace",
@@ -3322,6 +3324,8 @@ mod nats_replica;
 mod omni;
 #[path = "services/private_port.rs"]
 mod private_port;
+#[path = "services/routes.rs"]
+mod routes;
 #[path = "services/tunnel.rs"]
 mod tunnel;
 #[path = "services/update.rs"]
@@ -3910,6 +3914,7 @@ fn every_shipped_entrypoint_reaches_init_as_its_own_words_on_either_liblxc() {
     assert_eq!(
         checked,
         [
+            "arca-edge",
             "automagik-server",
             "cloudflare-tunnel",
             "nats",

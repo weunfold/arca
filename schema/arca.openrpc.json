@@ -1760,7 +1760,9 @@
                           "deploy_remove",
                           "function_create",
                           "function_remove",
-                          "host_network_restore"
+                          "host_network_restore",
+                          "route_add",
+                          "route_remove"
                         ],
                         "type": "string"
                       },
@@ -1887,7 +1889,9 @@
               "deploy_remove",
               "function_create",
               "function_remove",
-              "host_network_restore"
+              "host_network_restore",
+              "route_add",
+              "route_remove"
             ],
             "type": "string"
           }
@@ -3057,6 +3061,80 @@
                 "required": [],
                 "title": "host_network_restore",
                 "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "The args of route_add: Serve https://<hostname> from this node's edge (the arca-edge service) to an instance of this node, in any project, on one tcp port, with a certificate by the Cloudflare DNS challenge. reach private (default) answers only the local networks and the tailnet, others get 403; public has no filter. The instance's address is read from Incus now and the edge's firewall opens it; an Arca service needs a link from the edge (service_connect). A hostname that has a route is re-pointed. The route is kept in the edge's desired state, its config is written and Caddy reloaded; a refused reload keeps the old config and the answer says so. From an approved proposal or a doctor token. Example: {\"hostname\":\"app.example.com\",\"instance\":\"web\",\"port\":8080}",
+                "examples": [
+                  {
+                    "hostname": "app.example.com",
+                    "instance": "web",
+                    "port": 8080
+                  }
+                ],
+                "properties": {
+                  "hostname": {
+                    "description": "A DNS name such as app.example.com: lowercase letters, digits and -, at least two labels, no wildcard.",
+                    "maxLength": 253,
+                    "minLength": 3,
+                    "type": "string"
+                  },
+                  "instance": {
+                    "description": "The Incus instance that serves the route, on this node.",
+                    "maxLength": 63,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "port": {
+                    "description": "The instance's tcp port the edge connects to.",
+                    "maximum": 65535,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "project": {
+                    "description": "The instance's Incus project. Default: the node's service project.",
+                    "maxLength": 63,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "reach": {
+                    "description": "private (default): only the local networks and the tailnet. public: no address filter.",
+                    "enum": [
+                      "private",
+                      "public"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "hostname",
+                  "instance",
+                  "port"
+                ],
+                "title": "route_add",
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "The args of route_remove: Stop serving a hostname from this node's edge: its site leaves the edge's config, Caddy is reloaded and the edge's firewall no longer opens its target for it. The instance itself is not touched. Runs from an approved proposal or a doctor token. Example: {\"hostname\":\"app.example.com\"}",
+                "examples": [
+                  {
+                    "hostname": "app.example.com"
+                  }
+                ],
+                "properties": {
+                  "hostname": {
+                    "description": "A DNS name such as app.example.com: lowercase letters, digits and -, at least two labels, no wildcard.",
+                    "maxLength": 253,
+                    "minLength": 3,
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "hostname"
+                ],
+                "title": "route_remove",
+                "type": "object"
               }
             ],
             "description": "The action's own arguments: those of the anyOf branch whose title is the action.",
@@ -3094,7 +3172,9 @@
                 "deploy_remove",
                 "function_create",
                 "function_remove",
-                "host_network_restore"
+                "host_network_restore",
+                "route_add",
+                "route_remove"
               ],
               "type": "string"
             },
@@ -3471,7 +3551,9 @@
                 "deploy_remove",
                 "function_create",
                 "function_remove",
-                "host_network_restore"
+                "host_network_restore",
+                "route_add",
+                "route_remove"
               ],
               "type": "string"
             },
@@ -11207,6 +11289,328 @@
         }
       },
       "summary": "Before any move: whether a linked host can take each instance, one go/no-go row per instance in input order. Each row checks the instance's measured size against the target pool's free space less the earlier instances of the call, the storage driver change, the CPU features (all of them for a live move), devices the target lacks, networks and fixed addresses, projects, profiles and ACLs, proxies listening on this host's own address, and macvlan parent names, each ok or the reason it is not with what to do. It only reads: nothing is stopped, copied, created or recorded.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": true,
+      "x-arca-scope": "viewer",
+      "x-arca-writes": false
+    },
+    {
+      "name": "route_add",
+      "params": [
+        {
+          "name": "hostname",
+          "required": true,
+          "schema": {
+            "description": "A DNS name such as app.example.com: lowercase letters, digits and -, at least two labels, no wildcard.",
+            "maxLength": 253,
+            "minLength": 3,
+            "type": "string"
+          }
+        },
+        {
+          "name": "instance",
+          "required": true,
+          "schema": {
+            "description": "The Incus instance that serves the route, on this node.",
+            "maxLength": 63,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        {
+          "name": "port",
+          "required": true,
+          "schema": {
+            "description": "The instance's tcp port the edge connects to.",
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "name": "project",
+          "required": false,
+          "schema": {
+            "description": "The instance's Incus project. Default: the node's service project.",
+            "maxLength": 63,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        {
+          "name": "reach",
+          "required": false,
+          "schema": {
+            "description": "private (default): only the local networks and the tailnet. public: no address filter.",
+            "enum": [
+              "private",
+              "public"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "address": {
+              "type": "string"
+            },
+            "applied": {
+              "type": "boolean"
+            },
+            "edge": {
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "address"
+              ],
+              "type": "object"
+            },
+            "hostname": {
+              "type": "string"
+            },
+            "instance": {
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            },
+            "port": {
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "project": {
+              "type": "string"
+            },
+            "reach": {
+              "enum": [
+                "private",
+                "public"
+              ],
+              "type": "string"
+            },
+            "reloaded": {
+              "type": "boolean"
+            },
+            "removed": {
+              "const": true,
+              "type": "boolean"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "hostname",
+            "url",
+            "instance",
+            "project",
+            "address",
+            "port",
+            "reach",
+            "edge",
+            "applied",
+            "reloaded"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "Serve https://<hostname> from this node's edge (the arca-edge service) to an instance of this node, in any project, on one tcp port, with a certificate by the Cloudflare DNS challenge. reach private (default) answers only the local networks and the tailnet, others get 403; public has no filter. The instance's address is read from Incus now and the edge's firewall opens it; an Arca service needs a link from the edge (service_connect). A hostname that has a route is re-pointed. The route is kept in the edge's desired state, its config is written and Caddy reloaded; a refused reload keeps the old config and the answer says so. From an approved proposal or a doctor token.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": false,
+      "x-arca-scope": "doctor",
+      "x-arca-writes": true
+    },
+    {
+      "name": "route_remove",
+      "params": [
+        {
+          "name": "hostname",
+          "required": true,
+          "schema": {
+            "description": "A DNS name such as app.example.com: lowercase letters, digits and -, at least two labels, no wildcard.",
+            "maxLength": 253,
+            "minLength": 3,
+            "type": "string"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "address": {
+              "type": "string"
+            },
+            "applied": {
+              "type": "boolean"
+            },
+            "edge": {
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "address"
+              ],
+              "type": "object"
+            },
+            "hostname": {
+              "type": "string"
+            },
+            "instance": {
+              "type": "string"
+            },
+            "note": {
+              "type": "string"
+            },
+            "port": {
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "project": {
+              "type": "string"
+            },
+            "reach": {
+              "enum": [
+                "private",
+                "public"
+              ],
+              "type": "string"
+            },
+            "reloaded": {
+              "type": "boolean"
+            },
+            "removed": {
+              "const": true,
+              "type": "boolean"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "hostname",
+            "url",
+            "instance",
+            "project",
+            "address",
+            "port",
+            "reach",
+            "edge",
+            "applied",
+            "reloaded"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "Stop serving a hostname from this node's edge: its site leaves the edge's config, Caddy is reloaded and the edge's firewall no longer opens its target for it. The instance itself is not touched. Runs from an approved proposal or a doctor token.",
+      "x-arca-additional-properties": true,
+      "x-arca-class": "L",
+      "x-arca-read-only-hint": false,
+      "x-arca-scope": "doctor",
+      "x-arca-writes": true
+    },
+    {
+      "name": "route_list",
+      "params": [],
+      "result": {
+        "name": "result",
+        "schema": {
+          "properties": {
+            "edge": {
+              "properties": {
+                "address": {
+                  "type": "string"
+                },
+                "ipv4": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "address",
+                "ipv4"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "routes": {
+              "items": {
+                "properties": {
+                  "address": {
+                    "type": "string"
+                  },
+                  "hostname": {
+                    "type": "string"
+                  },
+                  "instance": {
+                    "type": "string"
+                  },
+                  "port": {
+                    "maximum": 65535,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "reach": {
+                    "enum": [
+                      "private",
+                      "public"
+                    ],
+                    "type": "string"
+                  },
+                  "url": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "hostname",
+                  "url",
+                  "instance",
+                  "project",
+                  "address",
+                  "port",
+                  "reach"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "edge",
+            "routes"
+          ],
+          "type": "object"
+        }
+      },
+      "summary": "This node's routes: each hostname with its instance, project, address, port and reach, and the edge that serves them with the address a person reaches it on. Empty, with no edge, on a node that has none.",
       "x-arca-additional-properties": true,
       "x-arca-class": "L",
       "x-arca-read-only-hint": true,
