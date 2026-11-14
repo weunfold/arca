@@ -70,6 +70,10 @@ fn instance(rig: &Rig, name: &str) -> Value {
 }
 
 fn propose(rig: &Rig, args: Value) -> Result<Value, CallError> {
+    propose_action(rig, "service_reconfigure", args)
+}
+
+fn propose_action(rig: &Rig, action: &str, args: Value) -> Result<Value, CallError> {
     arca::handlers::plan_handlers_served(
         rig.kernel.clone(),
         Arc::new(|| NOW),
@@ -82,10 +86,7 @@ fn propose(rig: &Rig, args: Value) -> Result<Value, CallError> {
     )
     .into_iter()
     .collect::<HashMap<_, _>>()["action_propose"]
-        .call(
-            json!({ "action": "service_reconfigure", "args": args }),
-            &doctor(),
-        )
+        .call(json!({ "action": action, "args": args }), &doctor())
 }
 
 /// Each approval in these tests is signed with a nonce of its own.
@@ -441,4 +442,112 @@ fn a_reconfigure_adds_sched_core_beside_no_new_privileges_and_the_card_shows_raw
     let writes = rig.fake.writes().len();
     rig.apply(&rig.service_config("app")).expect("reconcile");
     assert_eq!(rig.fake.writes().len(), writes);
+}
+
+#[test]
+fn a_template_that_adds_a_generated_secret_is_reconfigured_on_the_first_approval() {
+    let key = common::SkKey::from_seed(46);
+    let rig = node(&key);
+    let mut template = first_template();
+    template["secrets"] = json!(["API_KEY", "SESSION_KEY"]);
+    template["generate"] = json!({ "API_KEY": "ak_", "SESSION_KEY": "sk_" });
+    template["env"]["SESSION"] = json!("{{secret:SESSION_KEY}}");
+    rig.template("app", template);
+    let proposed = propose(&rig, json!({ "name": "app" })).expect("proposed");
+    assert_eq!(
+        proposed["args"]["changes"],
+        json!({
+            "environment": [{ "key": "SESSION", "change": "added", "secrets": ["SESSION_KEY"] }],
+            "secrets": [{ "name": "SESSION_KEY", "change": "generated" }]
+        })
+    );
+    assert_eq!(
+        row(&proposed["details"], "Secret SESSION_KEY"),
+        Some("added: secret, Arca makes its value now (never shown)")
+    );
+    let done = approve_and_run(&rig, &key, &proposed).expect("the first approval applies it");
+    assert_eq!(done["reconfigured"], true, "{done}");
+    assert_eq!(done["readBack"]["matches"], true, "{done}");
+    let made = fs::read_to_string(rig.dir.join("secrets/service-app/session-key"))
+        .expect("the secret was made");
+    assert!(made.starts_with("sk_"));
+    assert!(
+        instance(&rig, "app")["config"]["environment.SESSION"].as_str() == Some(made.as_str()),
+        "the instance holds the secret it was given"
+    );
+    let journal = fs::read_to_string(rig.dir.join("service-updates.jsonl")).expect("journal");
+    for text in [proposed.to_string(), done.to_string(), journal] {
+        assert!(!text.contains(&made), "a secret's value was shown");
+    }
+}
+
+#[test]
+fn a_raw_lxc_line_that_loosens_isolation_is_said_in_words_on_both_cards() {
+    let key = common::SkKey::from_seed(47);
+    let rig = node(&key);
+    let mut template = first_template();
+    template["rawLxc"] = json!(["lxc.sched.core=0", "lxc.mount.entry=/srv srv none bind 0 0"]);
+    rig.template("app", template.clone());
+    let proposed = propose(&rig, json!({ "name": "app" })).expect("proposed");
+    let isolation = |details: &Value| -> Vec<String> {
+        details
+            .as_array()
+            .expect("details")
+            .iter()
+            .filter(|row| row["label"] == "Isolation")
+            .map(|row| row["value"].as_str().expect("words").to_string())
+            .collect()
+    };
+    assert_eq!(
+        isolation(&proposed["details"]),
+        ["This line loosens the container's isolation: lxc.mount.entry"]
+    );
+
+    // A create from such a template shows raw.lxc whole, with the same words; one with sched.core alone says nothing
+    // more.
+    let mut strict = template;
+    strict["name"] = json!("strict");
+    strict["noNewPrivileges"] = json!(true);
+    rig.template("strict", strict.clone());
+    let create = propose_action(
+        &rig,
+        "service_create",
+        json!({ "name": "strict", "template": "strict" }),
+    )
+    .expect("a create card");
+    assert_eq!(
+        row(&create["details"], "Low-level container settings (raw.lxc)"),
+        Some("lxc.no_new_privs=1, lxc.sched.core=0, lxc.mount.entry=/srv srv none bind 0 0")
+    );
+    assert_eq!(
+        isolation(&create["details"]),
+        ["This line loosens the container's isolation: lxc.mount.entry"]
+    );
+    strict["name"] = json!("calm");
+    strict["rawLxc"] = json!(["lxc.sched.core=0"]);
+    rig.template("calm", strict);
+    let calm = propose_action(
+        &rig,
+        "service_create",
+        json!({ "name": "calm", "template": "calm" }),
+    )
+    .expect("a create card");
+    assert_eq!(
+        row(&calm["details"], "Low-level container settings (raw.lxc)"),
+        Some("lxc.no_new_privs=1, lxc.sched.core=0")
+    );
+    assert!(isolation(&calm["details"]).is_empty());
+    assert_eq!(
+        service::raw_lxc_loosens("lxc.apparmor.profile=unconfined").as_deref(),
+        Some("lxc.apparmor.profile")
+    );
+    assert_eq!(
+        service::raw_lxc_loosens("lxc.no_new_privs=0").as_deref(),
+        Some("lxc.no_new_privs")
+    );
+    assert_eq!(
+        service::raw_lxc_loosens("lxc.hook.mount=/bin/true").as_deref(),
+        Some("lxc.hook.mount")
+    );
+    assert!(service::raw_lxc_loosens("lxc.sched.core=0").is_none());
 }

@@ -426,7 +426,7 @@ static VERBS: [Verb; 70] = [
         class: VerbClass::L,
         min_scope: Scope::Doctor,
         writes: true,
-        destructive: false,
+        destructive: true,
         untrusted: false,
         output_key: None,
         summary_text: summary_service_reconfigure,
@@ -2136,6 +2136,7 @@ fn not_confirmed(name: &str) -> String {
         "service_import" => "nothing was imported",
         "service_release" => "nothing was released",
         "service_update" => "nothing was updated",
+        "service_reconfigure" => "nothing was reconfigured",
         "gpu_detach" => "nothing was detached",
         "storage_add" => "nothing was added",
         "action_approve" => "nothing was run",
@@ -3693,6 +3694,12 @@ fn service_create_params_base() -> Value {
                 "pattern": "^[0-9a-f]{64}$",
                 "type": "string"
             },
+            "rawLxc": {
+                "description": "Filled in by the node when a create is proposed from a container template that sets noNewPrivileges or rawLxc: the container's raw.lxc lines, whole and in order, so the owner's card shows them (and says in words when a line loosens the container's isolation). A caller leaves it out; one that states it must state exactly the template's.",
+                "items": { "maxLength": 256, "type": "string" },
+                "maxItems": 17,
+                "type": "array"
+            },
             "bridge": {
                 "description": "For a virtual-machine template: the existing host bridge its NIC joins, one of the node's allowed bridges. Left out, the virtual machine joins the managed service network when the node has one, and otherwise the node's only allowed bridge.",
                 "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,14}$",
@@ -4041,7 +4048,7 @@ pub fn summary_service_reconfigure(v: &Value) -> String {
 }
 
 fn service_reconfigure_params() -> Value {
-    with_tenant(json!({
+    with_tenant(with_confirm(json!({
         "additionalProperties": false,
         "properties": {
             "approval": {
@@ -4066,7 +4073,7 @@ fn service_reconfigure_params() -> Value {
         },
         "required": ["name", "approval"],
         "type": "object"
-    }))
+    })))
 }
 
 fn service_reconfigure_result() -> Value {

@@ -3931,6 +3931,14 @@ fn enrich_service_create(
         if let (Some(private), Some(object)) = (&private, payload.as_object_mut()) {
             object.insert("privatePort".to_string(), private_port_arg(private));
         }
+        // The `raw.lxc` the container gets, whole, so the owner's card shows it and the approval binds it.
+        let raw = crate::service::template_raw_lxc(&template);
+        if let Some(object) = payload.as_object_mut() {
+            object.remove("rawLxc");
+            if !raw.is_empty() {
+                object.insert("rawLxc".to_string(), json!(raw));
+            }
+        }
         return Ok(payload);
     }
     // The settings a create gives are checked now, so the owner's card never shows a value the create would refuse.
@@ -6922,6 +6930,8 @@ impl ServiceHandler {
                 // reads, and refused when they differ: they can only refuse, never widen.
                 "image",
                 "templateDigest",
+                // What a proposal is given when it is made: the `raw.lxc` lines the template gives, for the card.
+                "rawLxc",
             ],
             "service_status" => &["name"],
             "service_logs" => &["name", "lines"],
@@ -7678,6 +7688,16 @@ impl ServiceHandler {
                 let content = crate::service::load_template_content(&templates_dir, template_name)
                     .map_err(service_template_error)?;
                 let template = content.template.clone();
+                // A call that states the `raw.lxc` lines (a proposal fills them in for the card) states exactly the
+                // template's: it can only refuse, never widen.
+                if let Some(stated) = args.get("rawLxc")
+                    && *stated != json!(crate::service::template_raw_lxc(&template))
+                {
+                    return Err(CallError::Invalid(format!(
+                        "rawLxc: template {} gives its container other raw.lxc lines than the call states: the template changed after it was proposed. Propose the create again, so the owner's card says them",
+                        template.name
+                    )));
+                }
                 // Read before the create makes any secret: why this template is created stopped whatever `start` says.
                 let forced = crate::service::template_stopped_reason(
                     &template,

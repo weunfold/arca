@@ -292,6 +292,7 @@ fn every_argument_of_every_allowed_verb_is_in_details() {
                 "image": format!("images:debian/13 running {TEST_PG_IMAGE}"),
                 "templateDigest": "ab".repeat(32),
                 "registry": "https://registry.example",
+                "rawLxc": ["lxc.no_new_privs=1", "lxc.mount.entry=/srv srv none bind 0 0"],
             }),
             ActionKind::ServiceRemove => json!({ "name": "nats", "tenant": "abcdefgh" }),
             ActionKind::ServiceUpdate => json!({
@@ -689,6 +690,7 @@ fn every_argument_of_every_allowed_verb_is_in_details() {
                 (ActionKind::ServiceCreate, "destinations") => "Private network",
                 (_, "templateDigest") => "Template content",
                 (ActionKind::ServiceCreate, "registry") => "Registry",
+                (ActionKind::ServiceCreate, "rawLxc") => arca::action_proposal::RAW_LXC_LABEL,
                 _ => panic!("{action:?} field {field} has no owner label"),
             };
             let row = details
@@ -707,6 +709,24 @@ fn every_argument_of_every_allowed_verb_is_in_details() {
                     row.value
                 );
                 seen += 1;
+                continue;
+            }
+            // The container's raw.lxc is shown whole, and a line that loosens its isolation says so in words.
+            if field == "rawLxc" {
+                assert_eq!(
+                    row.value,
+                    "lxc.no_new_privs=1, lxc.mount.entry=/srv srv none bind 0 0"
+                );
+                let isolation: Vec<&str> = details
+                    .iter()
+                    .filter(|row| row.label == "Isolation")
+                    .map(|row| row.value.as_str())
+                    .collect();
+                assert_eq!(
+                    isolation,
+                    ["This line loosens the container's isolation: lxc.mount.entry"]
+                );
+                seen += 1 + isolation.len();
                 continue;
             }
             // The fields that are not strings are shown in words.

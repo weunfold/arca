@@ -511,6 +511,12 @@ impl ActionKind {
                         &destinations_words(&args["destinations"]),
                     ));
                 }
+                // The container's `raw.lxc`, whole (filled in from the template when the proposal is made), and a
+                // plain-words row for each line that loosens its isolation.
+                if let Some(lines) = args.get("rawLxc") {
+                    rows.push(row(RAW_LXC_LABEL, &list_words(lines)));
+                    rows.extend(loosening_rows(lines));
+                }
                 // The image is on a registry this node holds a credential for: the proposal names the registry (it
                 // is filled in when the proposal is made), and the card says where that credential then rests.
                 if let Some(server) = args.get("registry") {
@@ -1262,6 +1268,24 @@ fn reconfigure_count(changes: &Value) -> String {
     }
 }
 
+/// The label of the card row that shows a container's `raw.lxc` lines.
+pub const RAW_LXC_LABEL: &str = "Low-level container settings (raw.lxc)";
+
+/// One `Isolation` row for each `raw.lxc` line in `lines` that loosens the container's isolation, in plain words.
+fn loosening_rows(lines: &Value) -> Vec<ActionDetail> {
+    lines
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(crate::service::raw_lxc_loosens)
+        .map(|key| ActionDetail {
+            label: "Isolation".to_string(),
+            value: format!("This line loosens the container's isolation: {key}"),
+        })
+        .collect()
+}
+
 /// A list of names or numbers in words, or `none`.
 fn list_words(list: &Value) -> String {
     let items: Vec<String> = list
@@ -1347,13 +1371,14 @@ fn reconfigure_rows(args: &Value) -> Vec<ActionDetail> {
     }
     if let Some(raw) = changes.get("rawLxc") {
         rows.push(row(
-            "Low-level container settings (raw.lxc)".into(),
+            RAW_LXC_LABEL.into(),
             format!(
                 "{} (was: {})",
                 list_words(&raw["to"]),
                 list_words(&raw["from"])
             ),
         ));
+        rows.extend(loosening_rows(&raw["to"]));
     }
     if let Some(on) = changes["noNewPrivileges"]["to"].as_bool() {
         rows.push(row(

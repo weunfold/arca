@@ -147,10 +147,13 @@ fn current_values(
 }
 
 /// The service `config` as its template says now. Reads files and nothing else: no secret is made and nothing written.
+/// `made` names the secrets this run has just generated: they are shown as generated, as the card showed them, and
+/// rendered with the values now in their files.
 pub(super) fn plan(
     node: &NodeConfig,
     entries: &[Entry],
     config: &ServiceConfig,
+    made: &BTreeSet<String>,
 ) -> Result<Plan, CallError> {
     let name = &config.name;
     let template =
@@ -167,6 +170,10 @@ pub(super) fn plan(
     let mut generate = Vec::new();
     let mut secret_rows = Vec::new();
     for key in &template.secrets {
+        if made.contains(key) && values.contains_key(key) {
+            secret_rows.push(json!({ "name": key, "change": "generated" }));
+            continue;
+        }
         if values.contains_key(key) {
             continue;
         }
@@ -396,7 +403,7 @@ pub(super) fn check_proposal(
     if config.adopted || config.function.is_some() || config.vm.is_some() {
         return Ok(payload);
     }
-    payload["changes"] = plan(node, &scoped, &config)?.changes;
+    payload["changes"] = plan(node, &scoped, &config, &BTreeSet::new())?.changes;
     Ok(payload)
 }
 
@@ -436,7 +443,7 @@ impl ServiceHandler {
         }
         let _claim = Claim::take(&format!("{}\n{}", self.cfg.state_dir.display(), entry.id.0))
             .ok_or_else(|| said("another update of this service is running"))?;
-        let first = plan(&self.cfg, entries, &config)?;
+        let first = plan(&self.cfg, entries, &config, &BTreeSet::new())?;
         if args.get("changes") != Some(&first.changes) {
             return Err(said(
                 "the service or its template changed since the owner's card was made, so the card no longer says what would be applied: propose it again",
@@ -479,7 +486,9 @@ impl ServiceHandler {
             crate::service::generate_secret(&secrets_dir, &owner, key, prefix)
                 .map_err(service_template_error)?;
         }
-        let made = plan(&self.cfg, entries, &config)?;
+        let generated: BTreeSet<String> =
+            first.generate.iter().map(|(key, _)| key.clone()).collect();
+        let made = plan(&self.cfg, entries, &config, &generated)?;
         if made.changes != first.changes || !made.generate.is_empty() {
             journal.step("end", false, json!({ "why": "the plan moved" }));
             return Err(said(
@@ -511,7 +520,38 @@ impl ServiceHandler {
             self.amend(&entry.id.0, &name, |record| fields(record, &old))
                 .is_ok()
         };
-        if let Err(error) = self.amend(&entry.id.0, &name, |record| fields(record, &next)) {
+        // The record is read again under the node's write gate right before it is written: a link, a secret or a
+        // port that changed since the plan was made is never overwritten by a difference the card did not show.
+        let planned = |record: &ServiceConfig| {
+            serde_json::to_value((
+                &record.environment,
+                &record.links,
+                &record.secret_refs,
+                &record.ports,
+                &record.raw_lxc,
+                record.no_new_privileges,
+            ))
+            .ok()
+        };
+        let mut stale = false;
+        let written = self.amend(&entry.id.0, &name, |record| {
+            if planned(record) == planned(&config) {
+                fields(record, &next);
+            } else {
+                stale = true;
+            }
+        });
+        if written.is_ok() && stale {
+            journal.step(
+                "end",
+                false,
+                json!({ "why": "the record changed since the plan" }),
+            );
+            return Err(said(
+                "its record changed since the card was made (a link or a secret was set meanwhile): propose it again",
+            ));
+        }
+        if let Err(error) = written {
             let why = match &error {
                 CallError::Refused { message, .. } | CallError::Invalid(message) => message.clone(),
                 _ => "the node did not apply it".to_string(),

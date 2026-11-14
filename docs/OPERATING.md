@@ -983,8 +983,15 @@ record declares no line and does not set `noNewPrivileges`, the reconcile remove
 `lxc.no_new_privs=1` or exactly what the mark says Arca wrote, and removes the mark; any other `raw.lxc` is left as it
 is, as before. A service whose template declares no `rawLxc` carries no mark and is created and reconciled as it always
 was. `rawLxc` needs the same step on the node as `noNewPrivileges` (`restricted.containers.lowlevel=allow`), a tenant's
-service and a virtual-machine template are refused it the same way, and the record and the card keep the lines as
-`rawLxc`. An existing service takes new lines with `service_reconfigure` (see "Reconfiguring a service from its
+service and a virtual-machine template are refused it the same way, and the record keeps the lines as `rawLxc`. The
+create's card has a `Low-level container settings (raw.lxc)` row with the container's `raw.lxc` lines whole (the
+proposal fills `rawLxc` in from the template; a call that states it must state exactly the template's), and so does a
+reconfigure's card when they change. On both cards, a line that loosens the container's isolation gets a row of its
+own in plain words, `This line loosens the container's isolation: <key>`: `lxc.apparmor.profile=unconfined`,
+`lxc.apparmor.allow_nesting` or `allow_incomplete` other than `0`, `lxc.no_new_privs=0`, `lxc.cap.drop`,
+`lxc.cap.keep`, `lxc.include`, `lxc.idmap`, `lxc.seccomp.profile`, `lxc.mount.entry`, `lxc.mount.auto`,
+`lxc.mount.fstab`, `lxc.cgroup.devices.allow`, `lxc.cgroup2.devices.allow` and every `lxc.hook.*`. Nothing is refused
+for it: the owner decides on the card. An existing service takes new lines with `service_reconfigure` (see "Reconfiguring a service from its
 template").
 
 If the owner later sets `restricted.containers.lowlevel` back to `block`, Incus refuses every later write of the
@@ -1689,7 +1696,8 @@ by hand.
 `service_reconfigure` takes `{name, tenant?}` through `action_propose` and makes a container service what its CURRENT
 template says, behind one owner card, without a rebuild: the image and the data volume are not touched. Install the
 changed template first (`arca templates install`), then propose `{"action": "service_reconfigure", "args": {"name":
-"web"}}` with a `doctor` token. The node renders the service again from the installed template and works out the
+"web"}}`; any viewer may propose it, as every action, and only the owner's approval runs it. It is a destructive verb
+and takes the optional `confirm`. The node renders the service again from the installed template and works out the
 difference from its record, which it writes into the proposal as `changes`:
 
 - `environment`: one row per key that changes, removed first, then changed, then added, each in key order. A value the
@@ -1702,8 +1710,9 @@ difference from its record, which it writes into the proposal as `changes`:
   separately` (set it afterwards with `service_secret_set`, which renders the keys that use it), or, when the template
   says `generate`, as made by Arca now. A secret the service holds that the template no longer declares is removed
   from the record; its file stays. A secret's value never appears on the card, in the answer or in the journal.
-- `ports`, `rawLxc` and `noNewPrivileges`: `{from, to}` when the template says otherwise. A tenant's service keeps its
-  low-level container settings.
+- `ports`, `rawLxc` and `noNewPrivileges`: `{from, to}` when the template says otherwise; `rawLxc` is the container's
+  `raw.lxc` lines whole, `lxc.no_new_privs=1` among them when it is set. A tenant's service keeps its low-level
+  container settings.
 
 The card shows the service, a row counting the changes (`environment values 43 added, 2 changed, 1 removed; 4
 secrets; its low-level container settings`), one row for each environment key and secret that changes, the ports and
@@ -1718,7 +1727,11 @@ instance's config back. The answer carries `reconfigured`, the `changes` it appl
 `readBack: {matches, differs}`, where `differs` names the keys (or `raw.lxc`) whose value Incus holds is not what was
 applied, never a value. A write the node refuses, or a restart that fails, puts the old record back and starts the
 service again, and the answer says so. Each step is a line in `service-updates.jsonl` with key and secret names only.
-A card whose only difference is a secret whose value is set separately writes nothing and restarts nothing. A virtual
+A card whose only difference is a secret whose value is set separately writes nothing and restarts nothing. A secret
+the run generates is shown as generated on the card and in the answer, and is applied on the first approval. The
+record is read again under the node's write gate right before it is written: when a link, a secret, a port or the
+low-level settings changed since the plan was made (a `service_connect` or `service_secret_set` meanwhile), nothing is
+written and the call says to propose it again. A virtual
 machine, a function and an adopted service are refused. `service_reconfigure` and `service_update` of one service never
 run at once.
 
@@ -2664,9 +2677,10 @@ keys are sorted, it has no spaces, and it ends without a newline:
 {"action":"delete","expiresAt":"<ten minutes after issue>","host":"<host>","issuedAt":"<now>","nonce":"<32 hex digits>","paramsDigest":"<digest of {\"plan\":<plan>}>","target":"plan-<plan>"}
 ```
 
-An action proposal is an inert request from a viewer (normally the canvas Doctor) to run one of twenty-four gated
+An action proposal is an inert request from a viewer (normally the canvas Doctor) to run one of twenty-five gated
 service, database, GPU, storage, snapshot, instance, function or tenant verbs: `service_create`, `service_remove`,
 `service_update` (see [Updating a service to a new image digest](#updating-a-service-to-a-new-image-digest)),
+`service_reconfigure` (see [Reconfiguring a service from its template](#reconfiguring-a-service-from-its-template)),
 `service_import`, `service_release`
 (see [Importing a service another manager created](#importing-a-service-another-manager-created)), `service_publish`,
 `service_unpublish`,
@@ -2676,7 +2690,7 @@ service, database, GPU, storage, snapshot, instance, function or tenant verbs: `
 `instance_restart` (see [Starting, stopping and restarting instances](#starting-stopping-and-restarting-instances)).
 `function_create` and `function_remove` (see [Functions](#functions)), and `tenant_create`, `tenant_remove` and
 `deploy_remove` (see [Tenants](#tenants)), are proposed the same way. The canvas Doctor proposes twenty-two of them
-(not `service_update` and not `host_network_restore`); it reads `tenant_list`, `tenant_status`, `tenant_usage` (which names the deploy each instance
+(not `service_update`, `service_reconfigure` or `host_network_restore`); it reads `tenant_list`, `tenant_status`, `tenant_usage` (which names the deploy each instance
 came from), `function_list` and `function_runs` to know what to propose, and a removal of a tenant, a deploy or a
 function is drawn in the alert colour on its card. `action_propose` takes `{action, args}`; `args` is checked against
 that verb's own parameter schema, with
@@ -2687,7 +2701,7 @@ before its first call. The union sits inside `args`, never at the top of the inp
 one. `x-arca-by: "action"` tells the door to hold `args` to the branch `action` names, so a refusal is in that branch's
 own words (`/args: missing required field name`), not "matches none". A field the kernel fills in when the proposal is
 made (a GPU verb's `project`, `kind` and `uuid`; `storage_add`'s disk facts; the snapshot verbs' `name`, `kind`, pools
-and folder facts) takes any value in its branch and says so: the kernel removes or replaces what was sent, as it did
+and folder facts; `service_reconfigure`'s `changes`) takes any value in its branch and says so: the kernel removes or replaces what was sent, as it did
 before the branches. An unknown action is an invalid call and leaves no
 record. A proposal cannot choose a container image: `postgres_create` uses the image the node's `postgres-autopg`
 template names, or `kernel.postgresImage` on a node whose config sets it, and an explicit image that differs is

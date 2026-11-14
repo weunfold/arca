@@ -297,6 +297,40 @@ pub fn raw_lxc_value(cfg: &ServiceConfig) -> Option<String> {
     (!lines.is_empty()).then(|| lines.join("\n"))
 }
 
+/// The `raw.lxc` lines a container made from `template` gets, in order: what a create's card shows.
+pub fn template_raw_lxc(template: &Template) -> Vec<String> {
+    let mut lines = Vec::new();
+    if template.no_new_privileges {
+        lines.push(NO_NEW_PRIVS_RAW_LXC.to_string());
+    }
+    for line in &template.raw_lxc {
+        if !lines.contains(line) {
+            lines.push(line.clone());
+        }
+    }
+    lines
+}
+
+/// The key of a `raw.lxc` line that loosens the container's isolation (a host mount, a device, a hook, an included
+/// file, capabilities, an AppArmor or seccomp profile, an id map, no-new-privileges turned off), so a card says it in
+/// plain words. `None` for any other line. Nothing is refused for it.
+pub fn raw_lxc_loosens(line: &str) -> Option<String> {
+    let (key, value) = line.split_once('=')?;
+    let (key, value) = (key.trim(), value.trim());
+    let loosens = match key {
+        "lxc.apparmor.profile" => value == "unconfined",
+        "lxc.apparmor.allow_nesting" | "lxc.apparmor.allow_incomplete" => value != "0",
+        "lxc.no_new_privs" => value == "0",
+        "lxc.cap.drop" | "lxc.cap.keep" | "lxc.include" | "lxc.idmap" | "lxc.seccomp.profile" => {
+            true
+        }
+        "lxc.mount.entry" | "lxc.mount.auto" | "lxc.mount.fstab" => true,
+        "lxc.cgroup.devices.allow" | "lxc.cgroup2.devices.allow" => true,
+        _ => key.starts_with("lxc.hook."),
+    };
+    loosens.then(|| key.to_string())
+}
+
 /// Whether `line` may be one of a template's `rawLxc` lines: `lxc.<key>=<value>` on one line, the key of lower-case
 /// letters, digits, dots and underscores, at most [`RAW_LXC_LINE_MAX`] bytes, and no control character.
 pub fn raw_lxc_line_ok(line: &str) -> bool {
