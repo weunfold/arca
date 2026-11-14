@@ -292,8 +292,16 @@ function checkText(change) {
     case 'add-input':
       return `From the second run on, ${change.input}: ${change.value} restores the package cache ("Cache restored from key" in the log) and the install step is shorter.`;
     case 'set-runner':
-      if (change.pool) {
-        return `The moved jobs run on ${change.pool} for pushes and for pull requests from branches of this repository, and pass as before; their time stays within the p95 above, since each is short. This repository is public: a pull request from a fork would run its own code on ${change.pool}, the owner's machines, so the runs-on expression sends those to ${change.forks} instead. Open one from a fork to see it there. Nothing else changes runner.`;
+      if (change.public) {
+        return [
+          `The moved jobs run on ${change.pool} and pass as before; their time stays within the p95 above, since each is short. Nothing else changes runner.`,
+          '',
+          `**This repository is public. Read this before merging.** The jobs reach ${change.pool} only if the pool's runner group admits this public repository, and Arca's pool warns when it does: a job on the pool can reach the pool's GitHub credential and the other slots ("Who can reach what" in Arca's docs/OPERATING.md).`,
+          change.forks
+            ? `The runs-on expression sends ordinary pull requests from forks to ${change.forks}; open one from a fork to see it there. It is not a wall: a fork pull request runs its own copy of the workflow and can name ${change.pool} itself.`
+            : `Nothing in this workflow steers pull requests from forks, and any fork pull request can add a workflow of its own that names ${change.pool}.`,
+          'If you still want this, set fork pull request workflows to need approval for all outside collaborators (Settings, Actions, General), and read every workflow change before you approve a run.',
+        ].join('\n');
       }
       return `The moved jobs run on ${[...new Set(change.jobs.map((job) => job.to))].join(', ')} and pass as before; their time stays within the p95 above, since each is short. Nothing else changes runner.`;
     default:

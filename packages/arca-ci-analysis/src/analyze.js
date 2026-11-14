@@ -3,7 +3,7 @@
 // Pure: no network, no clock but the dataset's own.
 
 import { createHash } from 'node:crypto';
-import { jobCost } from './cost.js';
+import { jobCost, runnerOf } from './cost.js';
 import { cachingSteps, cancelsInProgress, jobFor, readWorkflow } from './workflow.js';
 
 const DONE = new Set(['success', 'failure']);
@@ -19,17 +19,34 @@ const seconds = (from, to) => (from && to ? Math.max(0, (Date.parse(to) - Date.p
 const round = (n, digits = 0) => (n == null ? null : Math.round(n * 10 ** digits) / 10 ** digits);
 const sum = (values) => values.reduce((a, b) => a + (b ?? 0), 0);
 
-/** A runner label as `--move-to` takes it: one plain runs-on label, which the pull request writes into a workflow. */
+/**
+ * A runner label as `--move-to` takes it: one plain runs-on label, which the pull request writes into a workflow. It
+ * starts with a letter, so YAML reads it written plain as a string (not `-`, `.inf` or `1e3`). It names the owner's
+ * own pool, so a GitHub-hosted or Blacksmith label is refused: jobs on it would be priced at $0 and the report would
+ * understate what is billed.
+ */
 export function checkLabel(label) {
   if (label == null) return null;
-  if (typeof label !== 'string' || !/^[A-Za-z0-9._-]{1,100}$/.test(label)) {
-    throw new Error(`--move-to takes one runner label (letters, digits, '.', '_' and '-'), not ${JSON.stringify(label)}`);
+  if (typeof label !== 'string' || !/^[A-Za-z][A-Za-z0-9._-]{0,99}$/.test(label)) {
+    throw new Error(`--move-to takes one runner label (a letter, then letters, digits, '.', '_' and '-'), not ${JSON.stringify(label)}`);
+  }
+  const { kind } = runnerOf([label]);
+  if (kind === 'github' || kind === 'blacksmith') {
+    throw new Error(`--move-to names the owner's own runner pool; ${label} is a ${kind === 'github' ? 'GitHub-hosted' : 'Blacksmith'} runner`);
   }
   return label;
 }
 
-/** The runs-on of a moved job in a public workflow that pull requests start: pull requests from forks stay on GitHub. */
-export const forkSafe = (label) => `\${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || '${label}' }}`;
+/** Events whose payload carries `pull_request` and whose run can be a fork pull request's code. */
+const PR_EVENTS = ['pull_request', 'pull_request_target', 'pull_request_review', 'pull_request_review_comment'];
+
+/**
+ * The runs-on of a moved job in a public workflow that pull requests start: a pull request whose head is not this
+ * repository (a fork, or a deleted head) goes to ubuntu-latest, anything else to the pool. It steers runs of the
+ * workflow as written; a fork pull request runs its own copy of the workflow and can name the pool itself.
+ */
+export const forkSafe = (label) =>
+  `\${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || '${label}' }}`;
 
 /**
  * @param {object} data a dataset (collect.js)
@@ -426,8 +443,9 @@ function failingWorkflows({ data, scale, workflowRows, jobs }) {
 /**
  * Short jobs on a billed runner that an unbilled one would run as well: the free GitHub-hosted runner of a public
  * repository, or, when `moveTo` names one, the label of the repository owner's own runner pool (whatever the
- * repository's visibility). In a public repository anyone can open a pull request from a fork, and its jobs would run
- * on that pool: a workflow that pull requests start keeps those on ubuntu-latest (`forkSafe`).
+ * repository's visibility). In a public repository anyone can open a pull request from a fork, and a fork pull request
+ * runs its own copy of the workflow, so it can name the pool. Every move in a public repository says so in its
+ * evidence; where pull requests start the workflow, `forkSafe` keeps the ordinary ones on ubuntu-latest.
  */
 function paidRunners({ data, scale, workflows, jobRows, moveTo }) {
   if (!moveTo && data.visibility !== 'public') return [];
@@ -437,7 +455,8 @@ function paidRunners({ data, scale, workflows, jobRows, moveTo }) {
   const out = [];
   for (const [path, workflow] of Object.entries(workflows)) {
     if (!workflow) continue;
-    const forks = Boolean(moveTo && data.visibility === 'public' && (workflow.on.pull_request || workflow.on.pull_request_target));
+    const exposed = Boolean(moveTo && data.visibility === 'public');
+    const forks = exposed && PR_EVENTS.some((event) => workflow.on[event]);
     const target = !moveTo ? 'ubuntu-latest' : forks ? forkSafe(moveTo) : moveTo;
     const moves = [];
     for (const job of workflow.jobs) {
@@ -463,11 +482,7 @@ function paidRunners({ data, scale, workflows, jobRows, moveTo }) {
         `${why}; these jobs run on ${[...new Set(moves.map((m) => m.from))].join(', ')} and cost $${round(usd, 2)} in ${data.window.days} days`,
         ...moves.map((m) => `${m.id}: p50 ${minutesText(m.p50)}, p95 ${minutesText(m.p95)} over ${m.runs} runs, $${round(m.usd, 2)}`),
         'a short job gains little from a faster runner; a job that needs the provider\'s own cache or hardware should stay',
-        ...(forks
-          ? [
-              `this repository is public and pull requests start this workflow: a job on ${moveTo} would run the code of anyone who opens a pull request from a fork on the owner's machines, so the change keeps pull requests from forks on ubuntu-latest (free for public repositories) and moves the rest`,
-            ]
-          : []),
+        ...(exposed ? publicPool(moveTo, forks) : []),
       ],
       weekly: { runnerMinutes: 0, wallMinutes: 0, usd: round(usd * scale, 2) },
       confidence: 'measured',
@@ -476,14 +491,28 @@ function paidRunners({ data, scale, workflows, jobRows, moveTo }) {
         kind: 'set-runner',
         path,
         jobs: moves.map((m) => ({ id: m.id, from: m.from, to: m.to })),
-        ...(forks ? { pool: moveTo, forks: 'ubuntu-latest' } : {}),
+        ...(exposed ? { pool: moveTo, public: true } : {}),
+        ...(forks ? { forks: 'ubuntu-latest' } : {}),
       },
       suggestion: forks
-        ? `Run ${moves.map((m) => m.id).join(', ')} on ${moveTo}, except for pull requests from forks, which stay on ubuntu-latest.`
-        : `Set runs-on: ${target} for ${moves.map((m) => m.id).join(', ')}.`,
+        ? `Run ${moves.map((m) => m.id).join(', ')} on ${moveTo}, and send ordinary pull requests from forks to ubuntu-latest; a fork pull request can still name ${moveTo} itself, so read the evidence about public repositories first.`
+        : exposed
+          ? `Set runs-on: ${target} for ${moves.map((m) => m.id).join(', ')}; this repository is public, so read the evidence about public repositories first.`
+          : `Set runs-on: ${target} for ${moves.map((m) => m.id).join(', ')}.`,
     });
   }
   return out;
+}
+
+/** What moving a public repository's jobs to the owner's pool exposes, in the evidence of every such move. */
+function publicPool(pool, forks) {
+  return [
+    `this repository is public: its jobs reach ${pool} only if the pool's runner group admits this public repository, and Arca's pool warns when it does, because a job on the pool can reach the pool's GitHub credential and the other slots ("Who can reach what" in Arca's docs/OPERATING.md)`,
+    forks
+      ? `the runs-on expression sends ordinary pull requests from forks to ubuntu-latest, but it is not a wall: a fork pull request runs its own copy of the workflow and can name ${pool} itself`
+      : `nothing in this workflow steers pull requests from forks, and any fork pull request can add a workflow of its own that names ${pool}`,
+    'if you still want this, set fork pull request workflows to need approval for all outside collaborators, and read every workflow change before you approve a run',
+  ];
 }
 
 /** Runs that kept going after a newer commit was pushed to the same branch or pull request. */

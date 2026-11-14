@@ -76,8 +76,8 @@ test('set-runner changes one plain runs-on value and refuses any other shape', (
 });
 
 test('set-runner writes the fork-safe expression plain or quoted, and it reads back as written', () => {
-  const to = "${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'acme-pool' }}";
-  const change = { kind: 'set-runner', path: 'ci.yml', jobs: [{ id: 'build', from: 'blacksmith-4vcpu-ubuntu-2404', to }], pool: 'acme-pool', forks: 'ubuntu-latest' };
+  const to = "${{ github.event.pull_request && github.event.pull_request.head.repo.full_name != github.repository && 'ubuntu-latest' || 'acme-pool' }}";
+  const change = { kind: 'set-runner', path: 'ci.yml', jobs: [{ id: 'build', from: 'blacksmith-4vcpu-ubuntu-2404', to }], pool: 'acme-pool', public: true, forks: 'ubuntu-latest' };
   for (const [written, expected] of [
     ['blacksmith-4vcpu-ubuntu-2404', `runs-on: ${to}\n`],
     ['"blacksmith-4vcpu-ubuntu-2404"', `runs-on: "${to}"\n`],
