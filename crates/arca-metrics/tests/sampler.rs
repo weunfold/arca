@@ -1623,7 +1623,10 @@ mod osd_readings {
     fn the_update_state_is_taken_with_the_osd_read_and_carried_between_reads() {
         let docs = Docs::default();
         let mut sampler = sampler_over(&docs);
-        assert!(sampler.os_update().is_none(), "no state before the first read");
+        assert!(
+            sampler.os_update().is_none(),
+            "no state before the first read"
+        );
         docs.serve(
             security(),
             json!({

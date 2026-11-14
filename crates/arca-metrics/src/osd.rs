@@ -197,7 +197,12 @@ pub fn read<R: IncusRead>(
 
 /// The update state the update document and, when given, the `/os/1.0` document say at `at`, with the success and update
 /// times `memory` carries. A body that is not an object is not known.
-pub fn update_state(update: &Value, os: Option<&Value>, at: u64, memory: &UpdateMemory) -> OsUpdate {
+pub fn update_state(
+    update: &Value,
+    os: Option<&Value>,
+    at: u64,
+    memory: &UpdateMemory,
+) -> OsUpdate {
     if !update.is_object() {
         return OsUpdate::unknown(at);
     }
@@ -222,13 +227,14 @@ pub fn update_state(update: &Value, os: Option<&Value>, at: u64, memory: &Update
     let escalated = update
         .pointer("/state/trust_escalated")
         .and_then(Value::as_bool);
-    let trust = (embedded.is_some() || presented.is_some() || failures.is_some() || escalated.is_some())
-        .then_some(UpdateTrust {
-            embedded_ca_fingerprint: embedded,
-            presented_ca_fingerprint: presented,
-            failures,
-            escalated,
-        });
+    let trust =
+        (embedded.is_some() || presented.is_some() || failures.is_some() || escalated.is_some())
+            .then_some(UpdateTrust {
+                embedded_ca_fingerprint: embedded,
+                presented_ca_fingerprint: presented,
+                failures,
+                escalated,
+            });
     let (last_updated_version, last_updated_at) = match &memory.updated {
         Some((version, at)) => (Some(version.clone()), *at),
         None => (None, None),
@@ -244,7 +250,9 @@ pub fn update_state(update: &Value, os: Option<&Value>, at: u64, memory: &Update
         last_success_at: memory.last_success_ms,
         last_updated_version,
         last_updated_at,
-        needs_reboot: update.pointer("/state/needs_reboot").and_then(Value::as_bool),
+        needs_reboot: update
+            .pointer("/state/needs_reboot")
+            .and_then(Value::as_bool),
         pending_version: text_at(update, "/state/health/pending_version"),
         previous_version: text_at(update, "/state/health/previous_version"),
         good_version: text_at(update, "/state/health/good_version"),
@@ -834,7 +842,10 @@ mod tests {
 
     impl IncusRead for Fake {
         fn get(&self, path: &str) -> Result<Value, arca_incus::IncusError> {
-            self.asked.lock().expect("not poisoned").push(path.to_string());
+            self.asked
+                .lock()
+                .expect("not poisoned")
+                .push(path.to_string());
             let found = match path {
                 SECURITY_PATH if self.update.is_some() => Some(security(true, "ok")),
                 UPDATE_PATH => self.update.clone(),
@@ -892,7 +903,11 @@ mod tests {
         assert_eq!(state.version.as_deref(), Some("202611010000"));
         assert_eq!(state.channel.as_deref(), Some("stable"));
         assert_eq!(state.check_frequency.as_deref(), Some("6h"));
-        assert_eq!(state.automatic, Some(true), "auto_updates_off is omitted when false");
+        assert_eq!(
+            state.automatic,
+            Some(true),
+            "auto_updates_off is omitted when false"
+        );
         assert_eq!(state.last_check_at, Some(AT));
         assert_eq!(state.last_success_at, Some(AT));
         assert_eq!(state.needs_reboot, Some(true));
@@ -900,9 +915,17 @@ mod tests {
         assert_eq!(state.previous_version.as_deref(), Some("202610150000"));
         assert_eq!(state.good_version.as_deref(), Some("202610150000"));
         assert_eq!(state.last_result.as_deref(), Some("baking"));
-        assert_eq!(state.last_reason.as_deref(), Some("waiting for the bake time"));
+        assert_eq!(
+            state.last_reason.as_deref(),
+            Some("waiting for the bake time")
+        );
         assert!(
-            !incus.asked.lock().expect("not poisoned").iter().any(|path| path == OS_PATH),
+            !incus
+                .asked
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .any(|path| path == OS_PATH),
             "the health names the version, so /os/1.0 is not asked"
         );
     }
@@ -918,7 +941,11 @@ mod tests {
             .expect("the config object")
             .remove("auto_updates_off");
         let state = update_state(&doc, None, AT, &UpdateMemory::default());
-        assert_eq!(state.automatic, Some(true), "omitted means off is false: on by default");
+        assert_eq!(
+            state.automatic,
+            Some(true),
+            "omitted means off is false: on by default"
+        );
         let state = update_state(&json!({ "state": {} }), None, AT, &UpdateMemory::default());
         assert_eq!(state.automatic, None, "no config object: unknown, not on");
     }
@@ -934,7 +961,14 @@ mod tests {
         let incus = Fake::new(Some(doc.clone()), Some(os));
         let (_, state) = read(&incus, AT, &mut UpdateMemory::default(), None);
         assert_eq!(state.version.as_deref(), Some("202610010000"));
-        assert!(incus.asked.lock().expect("not poisoned").iter().any(|path| path == OS_PATH));
+        assert!(
+            incus
+                .asked
+                .lock()
+                .expect("not poisoned")
+                .iter()
+                .any(|path| path == OS_PATH)
+        );
         // Without either version the field is null, and a failed /os/1.0 read is not a failed update read.
         let incus = Fake::new(Some(doc), None);
         let (_, state) = read(&incus, AT, &mut UpdateMemory::default(), None);
@@ -1003,7 +1037,9 @@ mod tests {
     fn an_updated_status_names_the_last_update_with_its_check_time() {
         let mut memory = UpdateMemory::default();
         let incus = Fake::new(
-            Some(arca_update("Arca OS has been updated to version 202611010000")),
+            Some(arca_update(
+                "Arca OS has been updated to version 202611010000",
+            )),
             None,
         );
         let (_, state) = read(&incus, AT, &mut memory, None);
@@ -1018,7 +1054,10 @@ mod tests {
         assert_eq!(state.last_updated_at, Some(AT));
         assert_eq!(state.last_success_at, Some(AT + DAY));
         // A status naming anything but a plain version token is not kept.
-        assert_eq!(updated_version("X has been updated to version 1.2 and more"), None);
+        assert_eq!(
+            updated_version("X has been updated to version 1.2 and more"),
+            None
+        );
         assert_eq!(updated_version("OS update check completed"), None);
     }
 
@@ -1033,7 +1072,10 @@ mod tests {
             serde_json::to_string(&state).expect("the state serializes"),
         ];
         for shown in shown {
-            assert!(!shown.contains("FAKE-INTERNAL-ERROR-TEXT"), "the raw last_error was kept");
+            assert!(
+                !shown.contains("FAKE-INTERNAL-ERROR-TEXT"),
+                "the raw last_error was kept"
+            );
             assert!(!shown.contains("x509"), "the raw last_error was kept");
             assert!(!shown.contains("Failed to"), "the status text was kept");
             assert!(!shown.contains(FAKE_KEY), "a fake key was shown");
@@ -1046,11 +1088,28 @@ mod tests {
         assert_eq!(value["known"], json!(false));
         assert_eq!(value["asOf"], json!(AT));
         for key in [
-            "version", "channel", "checkFrequency", "automatic", "lastCheckAt", "lastSuccessAt",
-            "lastUpdatedVersion", "lastUpdatedAt", "needsReboot", "pendingVersion", "previousVersion",
-            "goodVersion", "lastResult", "lastReason", "lastErrorKind", "trust",
+            "version",
+            "channel",
+            "checkFrequency",
+            "automatic",
+            "lastCheckAt",
+            "lastSuccessAt",
+            "lastUpdatedVersion",
+            "lastUpdatedAt",
+            "needsReboot",
+            "pendingVersion",
+            "previousVersion",
+            "goodVersion",
+            "lastResult",
+            "lastReason",
+            "lastErrorKind",
+            "trust",
         ] {
-            assert_eq!(value.get(key), Some(&Value::Null), "{key} is present and null");
+            assert_eq!(
+                value.get(key),
+                Some(&Value::Null),
+                "{key} is present and null"
+            );
         }
     }
 

@@ -43,9 +43,9 @@ use crate::adoptions::AdoptionRecord;
 use crate::config::{self, NodeConfig};
 use crate::handlers::{
     ActionExecutor, ActionSlot, AlertsExport, AlertsHandler, AlertsPublished, ApprovalStatus,
-    Clock, JournalListHandler, MetricsExport, MetricsHandler, OntologyQuery, OsUpdateHandler, OsUpdatePublished, Published,
-    SAMPLE_INTERVAL, StatusHandler, Ticker, TokenListHandler, WatchHandler, new_sampler, now_ms,
-    plan_handlers_served, spawn_watcher,
+    Clock, JournalListHandler, MetricsExport, MetricsHandler, OntologyQuery, OsUpdateHandler,
+    OsUpdatePublished, Published, SAMPLE_INTERVAL, StatusHandler, Ticker, TokenListHandler,
+    WatchHandler, new_sampler, now_ms, plan_handlers_served, spawn_watcher,
 };
 use crate::kernel::Kernel;
 use crate::{Failure, Flags};
@@ -360,7 +360,12 @@ pub fn serve(flags: &Flags) -> Result<Option<Value>, Failure> {
                 published: published.clone(),
             }),
         )
-        .handle("os_update", Arc::new(OsUpdateHandler { published: os_update }))
+        .handle(
+            "os_update",
+            Arc::new(OsUpdateHandler {
+                published: os_update,
+            }),
+        )
         .handle("watch_report", watch)
         .handle(
             "journal_list",
