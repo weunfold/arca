@@ -1056,4 +1056,18 @@ fn grants_survive_a_restart_of_the_store() {
     let caller = reopened.lookup(&access).expect("the token still works");
     assert_eq!(caller.scope, Scope::Viewer);
     assert!(caller.token_id.starts_with("oauth:mcpc-"));
+    // The audience: a server for another resource never accepts it (RFC 8707).
+    let ticks = Arc::clone(&rig.clock);
+    let elsewhere = OAuth::open(
+        "https://other.example.com",
+        "other.example.com",
+        Arc::clone(&rig.kernel),
+        Arc::new(move || ticks.load(Ordering::SeqCst)),
+        &rig.state_dir,
+    )
+    .expect("the store opens for another origin");
+    assert!(
+        elsewhere.lookup(&access).is_none(),
+        "a token is for its resource only"
+    );
 }
